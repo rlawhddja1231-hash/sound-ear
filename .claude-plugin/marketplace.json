@@ -7,7 +7,7 @@
       "name": "sound-ear",
       "source": "./plugins/sound-ear",
       "description": "Lets Claude 'hear' audio files and find problems (clicks, clipping, pitch glitches, off-pitch notes, sibilance) with timestamps and pictures.",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "category": "productivity",
       "tags": ["audio", "music", "vocal"]
     }

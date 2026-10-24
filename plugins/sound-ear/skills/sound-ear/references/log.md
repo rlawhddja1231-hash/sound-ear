@@ -2,6 +2,11 @@
 
 Newest first. Record date, file type, what was found, false positives, misses, and threshold changes.
 
+## 2026-10-24 — second real song (full mix, lossy opus recording, 4:02) — v1.0.1
+- −8.8 LUFS, G minor, ~123 BPM.
+- 3 of 11 "clicks" were note/drum onsets → clicks are now skipped when the level 3–23 ms after the spike is >1.5× (≈+3.5 dB) the level before it (a real click has similar level on both sides). Remaining 8 were very short (2–5 ms) high-frequency bursts that look like real ticks.
+- Self-test still 7/7 PASS.
+
 ## 2026-10-24 — first real song (full mix, lossy opus recording, 2:26)
 - −6.5 LUFS, F minor, ~172 BPM.
 - False positives fixed: (1) lossy decode overshoot reported as hundreds of "clipping" lines → lossy formats now give one summary line at "listen and decide"; (2) hi-hats / consonants flagged as clicks in a full mix → clicks downgraded in mix mode; (3) a deliberate gate/stutter effect flagged as abrupt cut → message now says it is fine if intentional.

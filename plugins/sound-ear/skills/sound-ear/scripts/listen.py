@@ -281,7 +281,21 @@ def check_clicks(st, sr, probs, stats, mode="vocal"):
         sh = np.roll(fm, k)
         near = np.maximum(near, sh)
     cand = (fm > 8 * med) & (fm > 0.02) & (near < fm / 3)
-    times = list(np.where(cand)[0] * 0.001)
+    # 소리가 새로 시작되는 곳(북·건반·자음의 첫소리)은 빼고 본다: 진짜 딸깍은 앞뒤 크기가 비슷하다
+    keep = []
+    w = int(sr * 0.02)
+    for i in np.where(cand)[0]:
+        c = i * f
+        before = mono[max(0, c - w - f * 2): max(1, c - f * 2)]
+        after = mono[c + f * 3: c + f * 3 + w]
+        if len(before) < w // 2 or len(after) < w // 2:
+            continue
+        rb = np.sqrt(np.mean(before ** 2)) + 1e-9
+        ra = np.sqrt(np.mean(after ** 2)) + 1e-9
+        if ra / rb > 1.5:  # 3.5dB 넘게 커짐 = 새 소리의 시작
+            continue
+        keep.append(i * 0.001)
+    times = keep
     groups = group_times(times, 0.03)
     stats["딸깍 소리"] = len(groups)
     for a, b, k in groups[:30]:

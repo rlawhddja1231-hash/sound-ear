@@ -72,10 +72,10 @@ Menu names differ between vocal synths and versions; treat these as general dire
 ## 4. Detection thresholds (inside the script)
 
 - Clipping: ≥0.999 for more than 3 samples in a row (lossy files: summary only)
-- Click: >3 kHz energy in a 1 ms bin over 8× the 150 ms local median, with 3–8 ms neighbours under a third of it (in mix mode downgraded to "listen and decide")
+- Click: >3 kHz energy in a 1 ms bin over 8× the 150 ms local median, with 3–8 ms neighbours under a third of it, skipping note/drum onsets where the level jumps more than 1.5× (in mix mode downgraded to "listen and decide")
 - Abrupt cut: from above −25 dB to below −60 dB within 10 ms
 - Pitch glitch: fine pitch (yin, 5.8 ms hop) more than 3 semitones from the local median and back within 80 ms, ignoring fade-ins/outs
 - Off-pitch: notes ≥0.25 s whose median is >30 cents off after removing the global tuning offset
 - Sibilance: 5–10 kHz energy within 6 dB of vowel level (75th percentile), >50 % of the frame, ≥30 ms
 
-Tuned on synthetic tests and one real song. If you see false positives or misses on real material, note them in `references/log.md` with the date and adjust.
+Tuned on synthetic tests and two real songs. If you see false positives or misses on real material, note them in `references/log.md` with the date and adjust.
