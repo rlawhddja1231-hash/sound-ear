@@ -5,7 +5,7 @@ import json, os, subprocess, sys, tempfile
 HERE = os.path.dirname(os.path.abspath(__file__))
 LISTEN = os.path.join(HERE, "..", "scripts", "listen.py")
 EXPECT = {  # kind keyword -> time (s)
-    "음정 어긋남": 3.6, "딸깍": 7.3, "클리핑": 10.0, "음이 순간 튐": 12.6,
+    "음정 어긋남": 3.6, "틱": 7.3, "클리핑": 10.0, "음이 순간 튐": 12.6,
     "뚝 끊김": 15.0, "ㅅ·ㅊ": 17.6, "끝이 잘림": 21.5,
 }
 with tempfile.TemporaryDirectory() as d:

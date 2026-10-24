@@ -1,6 +1,6 @@
 {
   "name": "sound-ear",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "description": "Lets Claude 'hear' audio: finds clicks, clipping, pitch glitches, off-pitch notes, sibilance and more with timestamps and pictures. Built for checking vocal-synth songs.",
   "author": { "name": "rlawhddja1231-hash", "url": "https://github.com/rlawhddja1231-hash" },
   "homepage": "https://github.com/rlawhddja1231-hash/sound-ear",

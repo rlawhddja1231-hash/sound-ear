@@ -283,6 +283,7 @@ def check_clicks(st, sr, probs, stats, mode="vocal"):
     cand = (fm > 8 * med) & (fm > 0.02) & (near < fm / 3)
     # 소리가 새로 시작되는 곳(북·건반·자음의 첫소리)은 빼고 본다: 진짜 딸깍은 앞뒤 크기가 비슷하다
     keep = []
+    cut_end = set()
     w = int(sr * 0.02)
     for i in np.where(cand)[0]:
         c = i * f
@@ -295,10 +296,32 @@ def check_clicks(st, sr, probs, stats, mode="vocal"):
         if ra / rb > 1.5:  # 3.5dB 넘게 커짐 = 새 소리의 시작
             continue
         keep.append(i * 0.001)
+        if ra / rb < 0.3:  # 큰 소리가 갑자기 끊기면서 난 틱 [확인: 10-24 테토 보컬 노트 끝]
+            cut_end.add(round(i * 0.001, 3))
     times = keep
     groups = group_times(times, 0.03)
     stats["딸깍 소리"] = len(groups)
+    # 완성곡에서 10초 안에 틱이 4개 넘게 몰리면 한 줄로 묶는다(끊어 자르기·글리치 같은 일부러 넣은 효과일 때가 많음)
+    # [확인: 10-24 Gumi 완성곡 1:08~1:18에 몰린 6곳]
+    if mode == "mix" and len(groups) >= 4:
+        starts = [g[0] for g in groups]
+        merged, used = [], set()
+        for i, a0 in enumerate(starts):
+            if i in used:
+                continue
+            idx = [j for j, a1 in enumerate(starts) if a0 <= a1 <= a0 + 10 and j not in used]
+            if len(idx) >= 4:
+                used.update(idx)
+                merged.append((starts[idx[0]], starts[idx[-1]], len(idx)))
+        for a0, a1, n in merged:
+            probs.append(dict(t=a0, end=a1, kind="틱이 몰린 구간", level=LEVEL_CHECK,
+                              msg=f"{n}곳에서 짧은 틱이 몰려 있습니다. 일부러 넣은 끊어 자르기·글리치 효과면 괜찮고, 아니면 이 구간의 편집 이음새를 보세요."))
+        groups = [g for i, g in enumerate(groups) if i not in used]
     for a, b, k in groups[:30]:
+        if any(abs(a - c) < 0.03 for c in cut_end):
+            probs.append(dict(t=a, end=None, kind="노트 끝 틱", level=LEVEL_CHECK,
+                              msg="큰 소리가 서서히 줄지 않고 한순간에 끊기면서 '틱' 소리가 납니다. 노트 끝에 짧은 페이드를 넣거나 노트 길이를 확인하세요."))
+            continue
         if mode == "mix":
             probs.append(dict(t=a, end=None, kind="딸깍·틱 소리", level=LEVEL_CHECK,
                               msg="아주 짧게 튀는 소리가 있습니다. 반주가 섞인 곡에서는 하이햇·자음 같은 짧은 소리도 잡히니 들어 보고 판단하세요."))
@@ -355,6 +378,10 @@ def check_pitch(y, sr, probs, stats, scale):
     f0, vflag, vprob = librosa.pyin(y, fmin=65.0, fmax=1400.0, sr=sr, frame_length=2048, hop_length=hop)
     t = librosa.times_like(f0, sr=sr, hop_length=hop)
     dt = hop / sr
+    # 거의 무음인 곳에서 음높이를 지어내지 않게 함 [확인: 10-24 곡 끝 무음에서 E6를 1.4초 잡음]
+    fr_rms = librosa.feature.rms(y=y, frame_length=2048, hop_length=hop)[0][: len(f0)]
+    if vflag.any():
+        vflag = vflag & (fr_rms > max(1e-4, 0.05 * float(np.median(fr_rms[vflag]))))
     midi = np.where(vflag, 69 + 12 * np.log2(np.where(np.isfinite(f0), f0, 1.0) / 440.0), np.nan)
     voiced_frac = float(np.mean(vflag))
     stats["목소리 있는 시간 비율"] = round(voiced_frac, 2)
@@ -367,19 +394,86 @@ def check_pitch(y, sr, probs, stats, scale):
     t2 = librosa.times_like(f2, sr=sr, hop_length=h2)
     m2 = 69 + 12 * np.log2(np.maximum(f2, 1.0) / 440.0)
     r2 = librosa.feature.rms(y=y, frame_length=1024, hop_length=h2)[0][: len(f2)]
+    # 확인용 스펙트럼: 튐이 진짜인지(배음이 정말 그 높이로 옮겨 갔는지) 본다
+    S2 = np.abs(librosa.stft(y, n_fft=2048, hop_length=h2, win_length=1024))
+    fr2 = librosa.fft_frequencies(sr=sr, n_fft=2048)
+
+    def salience(frame, hz):
+        if frame >= S2.shape[1] or hz <= 0:
+            return 0.0
+        col = S2[:, frame]
+        tot = 0.0
+        for k in range(1, 6):
+            f = hz * k
+            if f >= fr2[-1]:
+                break
+            b = int(round(f / (fr2[1] - fr2[0])))
+            tot += col[max(0, b - 1): b + 2].max()
+        return tot
+
+    def peak(frame, hz):
+        if frame >= S2.shape[1] or hz <= 20:
+            return 0.0
+        b = int(round(hz / (fr2[1] - fr2[0])))
+        return float(S2[max(0, b - 1): b + 2, frame].max())
     v2 = np.interp(t2, t, vflag.astype(float)) > 0.5
+    gmed = float(np.median(r2[v2])) if v2.any() else 0.0
+    raw_t = []
     for a, b in runs(v2):
         if b - a < 20:
+            continue
+        if np.median(r2[a:b]) < 0.15 * gmed:  # 숨·잡음 같은 아주 작은 소리 덩어리는 건너뜀
             continue
         seg = m2[a:b]
         sm = median_filter(seg, size=21, mode="nearest")
         dev = np.abs(seg - sm)
         rr = r2[a:b]
-        strong = rr > 0.3 * np.median(rr)  # 소리가 커지는 중·작아지는 중은 빼고 봄
+        # 소리가 커지는 중·작아지는 중(노트 시작·끝의 미끄러짐)은 빼고 봄.
+        # 0.3이던 기준을 0.6으로 올림 [확인: 10-24 신스V 보컬에서 노트 끝 내려가는 소리를 튐으로 헛짚음]
+        strong = rr > 0.6 * np.median(rr)
+        medr = np.median(rr)
+        for ga0, gb0 in runs(dev > 3.0):
+            raw_t.append(t2[a + ga0])
         for ga, gb in runs((dev > 3.0) & strong):
-            octave = abs(abs(np.median(seg[ga:gb] - sm[ga:gb])) - 12) < 0.6
+            jump = abs(float(np.median(seg[ga:gb] - sm[ga:gb])))
+            # 한 옥타브(12)·두 옥타브(24) 차이는 음높이 찾기가 흔히 헷갈리는 것(노트 끝이 작아질 때)이라,
+            # 소리가 충분히 클 때만 진짜 튐으로 본다 [확인: 10-24 신스V 보컬 녹음에서 헛짚은 39곳 대부분]
+            octave = min(abs(jump - 12), abs(jump - 24), abs(jump - 19)) < 1.0
+            if octave and np.min(rr[ga:gb]) < 0.8 * medr:
+                continue
+            # 갑자기 꺾여야 튐이다: 부드럽게 내려갔다 올라오는 V자(이음새의 자연스러운 꺾임)는 뺌
+            lo_i, hi_i = max(1, ga - 2), min(len(seg) - 1, gb + 2)
+            if np.max(np.abs(np.diff(seg[lo_i - 1: hi_i + 1]))) < 2.0:
+                continue
             if gb - ga <= int(0.08 / (h2 / sr)) and ga > 4 and gb < len(seg) - 4:
+                # 배음 확인: 튄 높이의 배음이 원래 높이의 배음보다 뚜렷해야 진짜 튐
+                # [확인: 10-24 신스V 보컬에서 yin이 옥타브·자음을 헷갈린 곳을 걸러냄]
+                k = ga + int(np.argmax(dev[ga:gb]))
+                hz_new = 440.0 * 2 ** ((seg[k] - 69) / 12)
+                hz_base = 440.0 * 2 ** ((sm[k] - 69) / 12)
+                if salience(a + k, hz_new) < 1.2 * salience(a + k, hz_base):
+                    continue
+                if peak(a + k, hz_new / 2) > (0.25 if octave else 0.5) * peak(a + k, hz_new):  # 한 옥타브 아래가 진짜 바탕음 = 헷갈린 것
+                    continue
+                # 원래 음의 바탕음이 튄 순간에도 그대로 남아 있으면, 음이 바뀐 게 아니라 찾기가 헷갈린 것
+                # [확인: 10-24 노트 끝에서 2배음이 더 커지자 한 옥타브 위로 잘못 잡음]
+                ref = peak(a + max(0, ga - 3), hz_base)
+                if ref > 0 and peak(a + k, hz_base) >= 0.5 * ref:
+                    continue
+                # 튄 높이에 실제 바탕음 소리가 있어야 함(없으면 음 바뀜 사이의 잡소리를 잘못 읽은 것)
+                if ref > 0 and peak(a + k, hz_new) < 0.3 * ref:
+                    continue
                 glitch_t.append((t2[a + ga], octave))
+    # 1초 안에 흔들림 후보가 4개 넘게 몰린 곳은 화음(두 목소리 이상)·잡음이라 음높이를 믿을 수 없다
+    # [확인: 10-24 테토 보컬의 화음 구간에서 두 줄 사이를 오가며 튐으로 헛짚음]
+    raw_arr = np.array(raw_t)
+    busy = []
+    kept = []
+    for g in glitch_t:
+        n_near = int(np.sum(np.abs(raw_arr - g[0]) <= 0.5)) if len(raw_arr) else 0
+        (busy if n_near >= 4 else kept).append(g)
+    glitch_t = kept
+    stats["음높이를 믿기 어려운 곳(화음·잡음)"] = len(group_times([b[0] for b in busy], 1.0))
     m2v = np.where(v2 & (r2 > 0.3 * (np.median(r2[v2]) if v2.any() else 0)), m2, np.nan)
     gl = group_times([g[0] for g in glitch_t], 0.15)
     stats["음 튐"] = len(gl)

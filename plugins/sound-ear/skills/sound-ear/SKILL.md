@@ -57,6 +57,9 @@ Menu names differ between vocal synths and versions; treat these as general dire
 | 소리가 0dB까지 꽉 참 | Lossy file (mp3/opus) touching 0 dB; can't prove real clipping | Check the original wav; master is very hot |
 | 트루 피크 넘침 (true peak over) | Fine now, may distort after mp3/AAC encoding | Limiter ceiling −1 dBTP |
 | 딸깍·틱 소리 (click) | Very short tick | Inspect note joins; re-render that part; add short fades at edit points |
+| 노트 끝 틱 (note-end tick) | A loud note stops dead and ticks | Add a short fade / extend the note tail |
+| 틱이 몰린 구간 (clustered ticks) | Many ticks within 10 s in a mix | Often a deliberate stutter/glitch edit; otherwise check edit seams |
+| 음높이를 믿기 어려운 곳 | Harmony or noise; pitch checks skipped there | Check with a single-voice export |
 | 뚝 끊김 (abrupt cut) | Sound stops instantly instead of decaying | Extend note tail / fade; check region ends (ignore if it's a gate effect) |
 | 끝이 잘림 / 시작이 잘림 | Export range shorter than the sound | Extend export range; add fade-out |
 | 음이 순간 튐 (pitch glitch) | Pitch jumps for tens of ms and returns | Remove the spike in the pitch curve; adjust note transition; check overlapping notes |
@@ -74,8 +77,8 @@ Menu names differ between vocal synths and versions; treat these as general dire
 - Clipping: ≥0.999 for more than 3 samples in a row (lossy files: summary only)
 - Click: >3 kHz energy in a 1 ms bin over 8× the 150 ms local median, with 3–8 ms neighbours under a third of it, skipping note/drum onsets where the level jumps more than 1.5× (in mix mode downgraded to "listen and decide")
 - Abrupt cut: from above −25 dB to below −60 dB within 10 ms
-- Pitch glitch: fine pitch (yin, 5.8 ms hop) more than 3 semitones from the local median and back within 80 ms, ignoring fade-ins/outs
+- Pitch glitch: fine pitch (yin, 5.8 ms hop) more than 3 semitones from the local median and back within 80 ms, with an abrupt step, at ≥60 % of phrase level, confirmed by the spectrum (new fundamental present, old one gone, no octave confusion); skipped where pitch is unreliable (harmony/noise clusters)
 - Off-pitch: notes ≥0.25 s whose median is >30 cents off after removing the global tuning offset
 - Sibilance: 5–10 kHz energy within 6 dB of vowel level (75th percentile), >50 % of the frame, ≥30 ms
 
-Tuned on synthetic tests and two real songs. If you see false positives or misses on real material, note them in `references/log.md` with the date and adjust.
+Tuned on synthetic tests, two vocal-only synth tracks and three full mixes. If you see false positives or misses on real material, note them in `references/log.md` with the date and adjust.
