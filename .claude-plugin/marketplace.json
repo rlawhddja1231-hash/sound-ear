@@ -1,0 +1,15 @@
+{
+  "name": "sound-ear-plugins",
+  "owner": { "name": "rlawhddja1231-hash", "url": "https://github.com/rlawhddja1231-hash" },
+  "description": "Audio listening tools for Claude",
+  "plugins": [
+    {
+      "name": "sound-ear",
+      "source": "./plugins/sound-ear",
+      "description": "Lets Claude 'hear' audio files and find problems (clicks, clipping, pitch glitches, off-pitch notes, sibilance) with timestamps and pictures.",
+      "version": "1.0.0",
+      "category": "productivity",
+      "tags": ["audio", "music", "vocal"]
+    }
+  ]
+}
