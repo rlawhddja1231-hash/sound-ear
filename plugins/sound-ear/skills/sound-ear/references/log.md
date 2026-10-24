@@ -2,6 +2,12 @@
 
 Newest first. Record date, file type, what was found, false positives, misses, and threshold changes.
 
+## 2026-10-24 — instruments, genre and mood with Essentia — v1.3.0
+- Added optional Essentia models (discogs-effnet embeddings + MTG-Jamendo instrument/moodtheme heads + Discogs-400 genre head). 4-minute song in ~6 s on 2 CPU cores.
+- Results: Korean folk-pop song → guitar/acoustic guitar/piano, K-pop/ballad; Gumi synth-pop → synthesizer/drums/bass, K-pop/dance-pop/synth-pop; Japanese vocaloid track → synthesizer/bass/sampler, happy hardcore/J-pop. All plausible.
+- Vocal-only Bad Apple: the AI said "drums 40 %" (trained on full mixes). Our beat-regularity check says no drums → drum-like labels dropped, and with no bass anywhere, instrument names are skipped.
+- Models are CC BY-NC-ND: not bundled; users download them.
+
 ## 2026-10-24 — lyrics and "describe" (listening like a person) — v1.2.0
 - Added `words` (whisper.cpp via pywhispercpp, ggml-small-q5_1) and `describe`.
 - Lyrics: Korean song 4:02 in 103 s, English song 3:24 and Japanese song 2:27 in ~2 min on 2 cores. English and Japanese came out almost word-perfect; Korean had a few misheard words over loud backing. Filter added for bracket tags like "[끝]".

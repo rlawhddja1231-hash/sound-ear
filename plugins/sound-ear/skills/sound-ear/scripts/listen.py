@@ -945,6 +945,81 @@ def cmd_words(args):
         print(f"  {fmt_t(a)} {t}" + (f"  ({flag})" if flag else ""))
 
 
+# ---------------------------------------------------------------- 음악 AI (Essentia: 악기·장르·분위기)
+INST_KO = {"accordion": "아코디언", "acousticbassguitar": "어쿠스틱 베이스", "acousticguitar": "어쿠스틱 기타", "bass": "베이스",
+           "beat": "비트", "bell": "종", "bongo": "봉고", "brass": "금관악기", "cello": "첼로", "clarinet": "클라리넷",
+           "classicalguitar": "클래식 기타", "computer": "전자음", "doublebass": "콘트라베이스", "drummachine": "드럼 머신",
+           "drums": "드럼", "electricguitar": "일렉 기타", "electricpiano": "전자 피아노", "flute": "플루트", "guitar": "기타",
+           "harmonica": "하모니카", "harp": "하프", "horn": "호른", "keyboard": "키보드", "oboe": "오보에", "orchestra": "오케스트라",
+           "organ": "오르간", "pad": "신스 패드", "percussion": "타악기", "piano": "피아노", "pipeorgan": "파이프 오르간",
+           "rhodes": "로즈 피아노", "sampler": "샘플러", "saxophone": "색소폰", "strings": "현악기", "synthesizer": "신시사이저",
+           "trombone": "트롬본", "trumpet": "트럼펫", "viola": "비올라", "violin": "바이올린", "voice": "목소리"}
+MOOD_KO = {"action": "액션", "adventure": "모험", "advertising": "광고 같은", "background": "배경음악 같은", "ballad": "발라드",
+           "calm": "차분한", "children": "아이 같은", "christmas": "크리스마스", "commercial": "상업적인", "cool": "멋진",
+           "corporate": "기업 홍보 같은", "dark": "어두운", "deep": "깊은", "documentary": "다큐 같은", "drama": "드라마",
+           "dramatic": "극적인", "dream": "꿈같은", "emotional": "감성적인", "energetic": "에너지 넘치는", "epic": "웅장한",
+           "fast": "빠른", "film": "영화 같은", "fun": "재미있는", "funny": "익살스러운", "game": "게임 음악 같은",
+           "groovy": "그루브 있는", "happy": "행복한", "heavy": "묵직한", "holiday": "휴일 같은", "hopeful": "희망찬",
+           "inspiring": "영감을 주는", "love": "사랑 노래", "meditative": "명상적인", "melancholic": "쓸쓸한", "melodic": "멜로디가 좋은",
+           "motivational": "힘을 주는", "movie": "영화 음악", "nature": "자연 같은", "party": "파티", "positive": "긍정적인",
+           "powerful": "힘찬", "relaxing": "편안한", "retro": "레트로", "romantic": "로맨틱", "sad": "슬픈", "sexy": "섹시한",
+           "slow": "느린", "soft": "부드러운", "soundscape": "소리 풍경", "space": "우주 같은", "sport": "스포츠",
+           "summer": "여름", "trailer": "예고편 같은", "travel": "여행", "upbeat": "경쾌한", "uplifting": "기분이 올라가는"}
+GENRE_TOP_KO = {"Pop": "팝", "Electronic": "일렉트로닉", "Rock": "록", "Hip Hop": "힙합", "Jazz": "재즈", "Classical": "클래식",
+                "Folk, World, & Country": "포크·월드·컨트리", "Funk / Soul": "펑크·소울", "Reggae": "레게", "Latin": "라틴",
+                "Blues": "블루스", "Stage & Screen": "영화·뮤지컬", "Children's": "어린이", "Non-Music": "음악 아님", "Brass & Military": "관악·군악"}
+
+
+def find_essentia_dir(explicit=None):
+    import glob
+    for d in [explicit, os.environ.get("SOUND_EAR_ESSENTIA"), os.path.expanduser("~/.cache/sound-ear/essentia"), os.getcwd()]:
+        if d and glob.glob(os.path.join(d, "discogs-effnet-bs64-1.pb")):
+            return d
+    return None
+
+
+def music_ai(path, mdir):
+    """Essentia 음악 AI로 1초쯤마다 악기·분위기·장르 확률을 낸다. [10-24 4분 곡 6초]"""
+    os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
+    import essentia
+    essentia.log.infoActive = False
+    essentia.log.warningActive = False
+    import essentia.standard as es
+    r = subprocess.run(["ffmpeg", "-v", "error", "-i", path, "-vn", "-f", "f32le", "-ac", "1", "-ar", "16000", "-"], capture_output=True)
+    a = np.frombuffer(r.stdout, np.float32).copy()
+    emb = es.TensorflowPredictEffnetDiscogs(graphFilename=os.path.join(mdir, "discogs-effnet-bs64-1.pb"), output="PartitionedCall:1")(a)
+    out = dict(n=emb.shape[0], dur=len(a) / 16000.0)
+    for key, name, inp, outp in [("inst", "mtg_jamendo_instrument", "model/Placeholder", "model/Sigmoid"),
+                                 ("mood", "mtg_jamendo_moodtheme", "model/Placeholder", "model/Sigmoid"),
+                                 ("genre", "genre_discogs400", "serving_default_model_Placeholder", "PartitionedCall:0")]:
+        pb = os.path.join(mdir, f"{name}-discogs-effnet-1.pb")
+        js = os.path.join(mdir, f"{name}-discogs-effnet-1.json")
+        if not (os.path.isfile(pb) and os.path.isfile(js)):
+            continue
+        cls = json.load(open(js, encoding="utf-8"))["classes"]
+        out[key] = (es.TensorflowPredict2D(graphFilename=pb, input=inp, output=outp)(emb), cls)
+    # 임베딩 하나는 약 3초 창을 1초쯤 간격으로 본다 → 시각
+    out["t"] = np.linspace(0, max(0.0, out["dur"] - 3.0), out["n"]) + 1.5
+    return out
+
+
+def ai_top(ai, key, mask=None, k=3, floor=0.12, drop=()):
+    if key not in ai:
+        return []
+    P, cls = ai[key]
+    if mask is not None:
+        if not mask.any():
+            return []
+        P = P[mask]
+    m = P.mean(axis=0)
+    idx = [i for i in np.argsort(m)[::-1] if cls[i] not in drop][:k]
+    return [(cls[i], float(m[i])) for i in idx if m[i] >= floor]
+
+
+def genre_ko(g):
+    top, _, sub = g.partition("---")
+    return f"{GENRE_TOP_KO.get(top, top)}·{sub}" if sub else GENRE_TOP_KO.get(top, top)
+
 # ---------------------------------------------------------------- 곡 설명 (구성·악기·분위기)
 def _feat_frames(y, sr, hop):
     import librosa
@@ -1147,6 +1222,25 @@ def cmd_describe(args):
         r["drums"] = reg >= 0.45 and ph > -26
         r["bass"] = r["low"] > max(0.05, 0.45 * low_top)
 
+    # 음악 AI(있으면): 곡 전체와 구간별 악기, 분위기, 장르
+    ai = None
+    if not args.no_ai:
+        mdir = find_essentia_dir(args.essentia)
+        if mdir:
+            try:
+                ai = music_ai(path, mdir)
+            except Exception as e:  # noqa
+                print("음악 AI를 못 돌렸습니다:", e)
+    any_drums = any(r["drums"] for r in rows)
+    # 우리 드럼 검사(박자 규칙성)가 곡 전체에 드럼이 없다고 하면 AI의 드럼류는 뺀다
+    # [확인: 10-24 보컬만 있는 Bad Apple에서 AI가 드럼 0.40이라고 함 — 반주 있는 곡으로 배운 AI라 그럼]
+    drumish = ("drums", "drummachine", "beat", "percussion", "bongo")
+    drop = drumish if not any_drums else ()
+    vocal_only = ai is not None and not any_drums and all(not r["bass"] for r in rows)
+    if ai is not None:
+        for r in rows:
+            mk = (ai["t"] >= r["a"]) & (ai["t"] < r["b"])
+            r["inst"] = [] if vocal_only else ai_top(ai, "inst", mk, k=4, floor=0.15, drop=drop + ("voice",))
     # 이름 붙이기 — 노래 없는 곳은 전주·간주·후주, 노래 있는 곳은 글자+몇 번째 반복.
     # '후렴'은 반복되면서 다른 노래 부분보다 확실히(1.5dB 넘게) 셀 때만 붙인다
     # [확인: 10-24 「마법이 사라진 세상에서」는 같은 멜로디를 여러 번 부르는 곡이라 '가장 많이 반복'을 후렴이라 부르면 틀림]
@@ -1212,14 +1306,34 @@ def cmd_describe(args):
     lines.append(f"- 길이 {fmt_t(dur)} / 조 {stats.get('조(키, 추정)', '?')} / 빠르기 약 {tempo:.0f} BPM (반이나 두 배일 수 있음)")
     if not have_words:
         lines.append("- 가사 받아쓰기 모델이 없어 노래가 있는지는 소리 세기로만 짐작했습니다.")
-    lines += ["", "## 흐름", "", "| 시각 | 구간(추정) | 닮은꼴 | 세기 | 드럼 | 저음 | 노래 | 가사 |", "|---|---|---|---|---|---|---|---|"]
+    if ai is not None:
+        gi = ai_top(ai, "genre", k=3, floor=0.05)
+        mi = ai_top(ai, "mood", k=4, floor=0.05)
+        ii = [] if vocal_only else ai_top(ai, "inst", k=6, floor=0.12, drop=drop + ("voice",))
+        lines.append(f"- **음악 AI가 들은 장르:** " + (", ".join(f"{genre_ko(g)} ({p:.0%})" for g, p in gi) or "잘 모르겠음"))
+        lines.append(f"- **음악 AI가 들은 분위기:** " + (", ".join(f"{MOOD_KO.get(m_, m_)} ({p:.0%})" for m_, p in mi) or "뚜렷하지 않음"))
+        if vocal_only:
+            lines.append("- **악기:** 반주 없이 목소리만 있는 파일로 보여 악기 이름은 적지 않았습니다.")
+        else:
+            lines.append(f"- **음악 AI가 들은 악기(곡 전체):** " + (", ".join(f"{INST_KO.get(i_, i_)} ({p:.0%})" for i_, p in ii) or "뚜렷하지 않음"))
+        lines.append("- 퍼센트는 AI가 '들린다'고 믿는 정도입니다. 30% 넘으면 꽤 확실, 15% 안팎은 '아마'.")
+    show_inst = ai is not None and not vocal_only
+    if show_inst:
+        lines += ["", "## 흐름", "", "| 시각 | 구간(추정) | 닮은꼴 | 세기 | 드럼 | 저음 | 노래 | 들리는 악기(AI) | 가사 |", "|---|---|---|---|---|---|---|---|---|"]
+    else:
+        lines += ["", "## 흐름", "", "| 시각 | 구간(추정) | 닮은꼴 | 세기 | 드럼 | 저음 | 노래 | 가사 |", "|---|---|---|---|---|---|---|---|"]
+    prev_inst = set()
     prev_e = None
     story = []
     for r, nm in zip(rows, names):
         bar = "█" * int(np.clip((r["e"] - song_db + 24) / 3, 1, 8))
         v = "-" if r["v"] is None else ("있음" if r["v"] > 0.25 else "없음")
         w = (r["words"][:60] + "…") if len(r["words"]) > 60 else r["words"]
-        lines.append(f"| {fmt_t(r['a'])}~{fmt_t(r['b'])} | {nm} | {r['lab']} | {bar} | {'O' if r['drums'] else '·'} | {'O' if r['bass'] else '·'} | {v} | {w} |")
+        insts = [INST_KO.get(i_, i_) for i_, p in r.get("inst", [])]
+        cells = f"| {fmt_t(r['a'])}~{fmt_t(r['b'])} | {nm} | {r['lab']} | {bar} | {'O' if r['drums'] else '·'} | {'O' if r['bass'] else '·'} | {v} |"
+        if show_inst:
+            cells += f" {', '.join(insts) or '-'} |"
+        lines.append(cells + f" {w} |")
         change = ""
         if prev_e is not None:
             d = r["e"] - prev_e
@@ -1230,14 +1344,23 @@ def cmd_describe(args):
         if r["bass"]:
             parts.append("묵직한 저음")
         inst = (" 과 ".join(parts).replace(" 과 ", "과 ") + "이 깔리고") if parts else "드럼 없이 가볍게"
+        if show_inst:
+            cur = {i_ for i_, p in r.get("inst", [])}
+            newin = [INST_KO.get(i_, i_) for i_ in cur - prev_inst if i_ not in drumish and i_ != "bass"]
+            if newin and prev_e is not None:
+                inst += f", {'·'.join(newin)} 소리가 새로 들림"
+            elif insts and prev_e is None:
+                inst += f", {'·'.join(insts[:3])} 소리"
+            prev_inst = cur
         story.append(f"- **{fmt_t(r['a'])}** {change}{nm} — {inst}" + (f", 노래: “{r['words'][:40]}”" if r["words"] else ""))
         prev_e = r["e"]
     lines += ["", "## 들은 대로 말하면", ""] + story
     reps = sorted({r["lab"] for r in rows if total[r["lab"]] > 1})
     if reps:
-        lines.insert(4, "- 반복되는 부분: " + ", ".join(f"{l}({total[l]}번)" for l in reps) + (f" — 그중 {chorus}가 같은 가사·멜로디로 반복되고 세서 후렴으로 봤습니다" if chorus else " — 다른 부분보다 확 센 반복이 없어 후렴은 정하지 않았습니다"))
+        lines.insert(next(i for i, l in enumerate(lines) if l.startswith("- 길이")) + 1, "- 반복되는 부분: " + ", ".join(f"{l}({total[l]}번)" for l in reps) + (f" — 그중 {chorus}가 같은 가사·멜로디로 반복되고 세서 후렴으로 봤습니다" if chorus else " — 다른 부분보다 확 센 반복이 없어 후렴은 정하지 않았습니다"))
     lines += ["", "※ 구간 이름·분위기·악기는 소리 특징으로 짐작한 것입니다. 닮은꼴 글자가 같으면 비슷한 멜로디·화음의 반복입니다.",
-              "※ 악기는 '드럼(때리는 소리)'과 '저음(베이스·킥)'만 가려냅니다. 피아노·기타 같은 악기 이름은 아직 못 맞힙니다."]
+              ("※ 드럼·저음 칸은 소리 특징으로, '들리는 악기' 칸은 음악 AI(Essentia, 비상업용 모델)가 들은 것입니다. 악기 AI는 반주가 있는 곡으로 배워서 목소리만 있는 파일에서는 믿기 어렵습니다."
+               if ai is not None else "※ 악기는 '드럼(때리는 소리)'과 '저음(베이스·킥)'만 가려냅니다. 악기 이름·장르·분위기 AI(Essentia 모델 파일)가 있으면 더 자세히 들립니다.")]
     if have_words:
         # 반복되는 가사(훅·후렴구): 비슷한 줄이 다른 시각에 또 나오면 묶어서 보여 준다
         good = [(a, b, t) for a, b, t, fl in words if not fl and len(t) >= 6]
@@ -1265,8 +1388,10 @@ def cmd_describe(args):
     rp = os.path.join(out, "곡설명.md")
     open(rp, "w", encoding="utf-8").write("\n".join(lines))
     json.dump(dict(mood=mood, tempo=tempo, key=stats.get("조(키, 추정)"),
+                   ai=None if ai is None else dict(genre=ai_top(ai, "genre", k=5, floor=0.0), mood=ai_top(ai, "mood", k=6, floor=0.0),
+                                                    instruments=[] if vocal_only else ai_top(ai, "inst", k=8, floor=0.0, drop=drop)),
                    sections=[dict(start=r["a"], end=r["b"], name=nm, label=r["lab"], energy_db=r["e"], drums=bool(r["drums"]),
-                                  bass=bool(r["bass"]), vocals=r["v"], words=r["words"]) for r, nm in zip(rows, names)]),
+                                  bass=bool(r["bass"]), vocals=r["v"], words=r["words"], instruments=r.get("inst", [])) for r, nm in zip(rows, names)]),
               open(os.path.join(out, "describe.json"), "w", encoding="utf-8"), ensure_ascii=False, indent=1)
 
     # 그림: 세기 곡선 + 구간 색 띠 + 노래 있는 곳
@@ -1329,6 +1454,8 @@ def main():
     d.add_argument("--lang", default="auto")
     d.add_argument("--words", help="이미 받아쓴 words.json")
     d.add_argument("--no-words", action="store_true")
+    d.add_argument("--essentia", help="Essentia 모델 폴더")
+    d.add_argument("--no-ai", action="store_true", help="음악 AI(악기·장르·분위기) 끄기")
     d.add_argument("--out")
     d.set_defaults(fn=cmd_describe)
     m = sub.add_parser("compare")

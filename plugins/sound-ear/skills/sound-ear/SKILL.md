@@ -1,6 +1,6 @@
 ---
 name: sound-ear
-description: "Lets Claude 'hear' audio files. Turns songs, vocals or video soundtracks into numbers and pictures with a bundled script, then finds problems with timestamps: clicks, clipping, abrupt cuts, pitch glitches, off-pitch notes, wobbly notes, harsh sibilance, loud breaths, cut-off endings, loudness too high or low. Also estimates BPM, key and vocal range, transcribes lyrics and speech with whisper.cpp, and describes a song the way a listener would: sections (intro, verses, chorus, breaks), repeats, drums and bass, loudness changes, mood and repeated lyric hooks. Built for checking vocal-synth songs (SynthV, VOCALOID, UTAU). Use whenever the user shares an audio or video file (wav, mp3, flac, m4a, ogg, opus, webm, mp4) or asks to listen, describe a song, get lyrics or subtitles, check a mix, find glitches, measure BPM/key/loudness, or compare two versions. 소리 듣기: 노래 들어 봐, 검수, 가사, 받아쓰기, 자막, 곡 구성, 후렴, 분위기, 음정, 음 튐, 딸깍, 잡음, 깨짐, 끊김, BPM, 키, 음역, 믹싱, 두 판 비교."
+description: "Lets Claude 'hear' audio files. Turns songs, vocals or video soundtracks into numbers and pictures with a bundled script, then finds problems with timestamps: clicks, clipping, abrupt cuts, pitch glitches, off-pitch notes, wobbly notes, harsh sibilance, loud breaths, cut-off endings, loudness too high or low. Also estimates BPM, key and vocal range, transcribes lyrics and speech with whisper.cpp, and describes a song the way a listener would: sections (intro, verses, chorus, breaks), repeats, drums, bass and named instruments, genre, loudness changes, mood and repeated lyric hooks. Built for checking vocal-synth songs (SynthV, VOCALOID, UTAU). Use whenever the user shares an audio or video file (wav, mp3, flac, m4a, ogg, opus, webm, mp4) or asks to listen, describe a song, get lyrics or subtitles, check a mix, find glitches, measure BPM/key/loudness, or compare two versions. 소리 듣기: 노래 들어 봐, 검수, 가사, 받아쓰기, 자막, 곡 구성, 후렴, 분위기, 음정, 음 튐, 딸깍, 잡음, 깨짐, 끊김, BPM, 키, 음역, 믹싱, 두 판 비교."
 license: MIT
 ---
 
@@ -8,7 +8,7 @@ license: MIT
 
 Claude has no ears. This skill turns an audio file into **numbers and pictures** with `scripts/listen.py`, so Claude can inspect it, point at exact timestamps, and explain how to fix each problem. Reply to the user in their own language (the report and chart labels are in Korean; translate them when the user writes in another language).
 
-What it cannot do: listen live through a microphone, name specific instruments (piano vs guitar), or judge taste. Lyrics need a whisper model file (see setup). Pitch checks need a **vocal-only** file; with a full mix the accompaniment confuses pitch tracking.
+What it cannot do: listen live through a microphone or judge taste. Lyrics need a whisper model file; instrument, genre and mood names need Essentia model files (see setup). Pitch checks need a **vocal-only** file; with a full mix the accompaniment confuses pitch tracking.
 
 ## 1. Setup (once per session)
 
@@ -22,6 +22,8 @@ echo "$L"
 ```
 
 **Lyrics / speech (optional):** `pip install pywhispercpp` and a whisper.cpp model file `ggml-*.bin` from https://huggingface.co/ggerganov/whisper.cpp (recommended: `ggml-small-q5_1.bin`, 190 MB, MIT). Put it in `~/.cache/sound-ear/` or pass `--model`, or set `SOUND_EAR_MODEL`. If the sandbox cannot reach Hugging Face, ask the user to download the file and attach it. Without a model, `describe` still works but guesses where the singing is from loudness only.
+
+**Instruments, genre and mood (optional):** `pip install essentia-tensorflow` and these files from https://essentia.upf.edu/models/ (about 26 MB; **CC BY-NC-ND 4.0, non-commercial** — never bundle or redistribute them, the user downloads them): `feature-extractors/discogs-effnet/discogs-effnet-bs64-1.pb`, and from `classification-heads/`: `mtg_jamendo_instrument-discogs-effnet-1.pb/.json` (40 instruments), `genre_discogs400-discogs-effnet-1.pb/.json` (400 genres), `mtg_jamendo_moodtheme-discogs-effnet-1.pb/.json` (56 moods). Put them in `~/.cache/sound-ear/essentia/` or pass `--essentia DIR` / set `SOUND_EAR_ESSENTIA`. About 6 s for a 4-minute song.
 
 Self-test (optional, ~20 s): `python3 "$(dirname "$L")/../tests/selftest.py"` → should print `PASS` (7 planted problems found, none extra).
 
@@ -63,7 +65,8 @@ How it decides (so you can explain or overrule it):
 - **Sections**: novelty curve on beat-synchronous chroma + timbre + loudness; repeats are long diagonal stripes in a chroma recurrence matrix. Same letter = same melody/harmony.
 - **Chorus**: a repeated section whose repeats also share the *same lyrics* (same melody with different lyrics is a verse). Without lyrics it falls back to "repeated and clearly louder"; if neither holds it does not name a chorus.
 - **Drums**: percussive part (HPSS) hitting regularly on the beat (autocorrelation ≥ 0.45). Vocal-only tracks score ~0.25.
-- **Mood**: from key (major/minor), tempo, loudness and brightness — a rough guess; say so.
+- **Mood**: the one-line guess comes from key (major/minor), tempo, loudness and brightness. With Essentia models, the music AI's genre, mood and instrument guesses (with confidence %) are added: above ~30 % is fairly sure, ~15 % is "maybe". Per-section instruments show what enters or leaves.
+- **Vocal-only files**: the instrument AI was trained on full mixes and hears drums in a cappella tracks; when the beat-regularity check finds no drums anywhere, drum-like labels are dropped, and when there is also no bass anywhere, instrument names are skipped.
 - **Lyrics**: whisper.cpp; lines that look made up during instrumentals (subtitle credits, repeated lines) are flagged. Sung lyrics have mistakes, especially over loud backing; vocal-only files are much better. About 25–40 s per minute of audio on 2 CPU cores with the small model.
 
 ## 3. What each finding means and how to fix it
