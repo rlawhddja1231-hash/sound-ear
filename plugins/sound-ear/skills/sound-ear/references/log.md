@@ -2,6 +2,12 @@
 
 Newest first. Record date, file type, what was found, false positives, misses, and threshold changes.
 
+## 2026-10-25 — full workflow on a Korean vocal-synth pop song — v1.3.1
+- New SeeU voice demo "Alone" (4:26, full mix, lossy recording). check + describe (lyrics + music AI) took ~3.5 min.
+- Click false positive at 1:00.4 was a kick drum (same shape as the kicks around it). Clicks are now skipped when low-band (<150 Hz) energy in the next 40 ms rises >1.25× in mixes (>2× otherwise). Self-test still 7/7.
+- The one-line loudness word said "quiet" for a dense pop song: it used mean RMS dB. Now uses integrated LUFS (> −10 "dense and loud", > −16 "strong", else "soft").
+- Structure: 4 repeats of one vocal section were found but no chorus was named (lyrics transcribed differently each time over the dense backing) — honest but a known limit; vocal separation would help.
+
 ## 2026-10-24 — instruments, genre and mood with Essentia — v1.3.0
 - Added optional Essentia models (discogs-effnet embeddings + MTG-Jamendo instrument/moodtheme heads + Discogs-400 genre head). 4-minute song in ~6 s on 2 CPU cores.
 - Results: Korean folk-pop song → guitar/acoustic guitar/piano, K-pop/ballad; Gumi synth-pop → synthesizer/drums/bass, K-pop/dance-pop/synth-pop; Japanese vocaloid track → synthesizer/bass/sampler, happy hardcore/J-pop. All plausible.

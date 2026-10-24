@@ -284,6 +284,7 @@ def check_clicks(st, sr, probs, stats, mode="vocal"):
         near = np.maximum(near, sh)
     cand = (fm > 8 * med) & (fm > 0.02) & (near < fm / 3)
     # 소리가 새로 시작되는 곳(북·건반·자음의 첫소리)은 빼고 본다: 진짜 딸깍은 앞뒤 크기가 비슷하다
+    low = sosfilt(butter(4, 150, btype="lowpass", fs=sr, output="sos"), mono)
     keep = []
     cut_end = set()
     w = int(sr * 0.02)
@@ -297,6 +298,15 @@ def check_clicks(st, sr, probs, stats, mode="vocal"):
         ra = np.sqrt(np.mean(after ** 2)) + 1e-9
         if ra / rb > 1.5:  # 3.5dB 넘게 커짐 = 새 소리의 시작
             continue
+        # 킥 드럼: 튐과 동시에 낮은 소리(150Hz 아래)가 확 커지면 북 소리지 딸깍이 아니다
+        # [확인: 10-25 새 시유 「Alone」 1:00.4 — 확대해 보니 앞뒤 킥과 똑같은 모양]
+        lb = low[max(0, c - w - f * 2): max(1, c - f * 2)]
+        la = low[c: c + 2 * w]
+        if len(lb) and len(la):
+            rl = np.sqrt(np.mean(la ** 2)) / (np.sqrt(np.mean(lb ** 2)) + 1e-9)
+            # 완성곡은 베이스가 계속 깔려 있어 킥이 와도 1.3배쯤만 커진다 → 완성곡은 1.25배, 그 밖은 2배
+            if rl > (1.25 if mode == "mix" else 2.0) and np.sqrt(np.mean(la ** 2)) > 0.02:
+                continue
         keep.append(i * 0.001)
         if ra / rb < 0.3:  # 큰 소리가 갑자기 끊기면서 난 틱 [확인: 10-24 테토 보컬 노트 끝]
             cut_end.add(round(i * 0.001, 3))
@@ -1128,7 +1138,7 @@ def _mood(stats_key, tempo, energy_db, cent_hz):
         sp = "보통 빠르기의"
     else:
         sp = "느리고 차분한"
-    pw = "세고 꽉 찬" if energy_db > -12 else ("힘 있는" if energy_db > -16 else "잔잔한")
+    pw = "세고 꽉 찬" if energy_db > -8 else ("힘 있는" if energy_db > -14 else "잔잔한")
     tone = ""
     if cent_hz > 3000:
         tone = ", 높은 소리가 많아 반짝임"
@@ -1300,7 +1310,14 @@ def cmd_describe(args):
             nm = f"노래 {r['lab']}" + (f" ({k}번째 반복)" if total[r["lab"]] > 1 and k > 1 else "")
         names.append(nm)
 
-    mood = _mood(stats.get("조(키, 추정)"), tempo, song_db, float(np.median(f["cent"])))
+    try:
+        import pyloudnorm as pyln
+        lufs = float(pyln.Meter(sr0).integrated_loudness(st))
+    except Exception:
+        lufs = None
+    # 세기는 사람이 듣는 크기(LUFS)로 판단 [확인: 10-25 꽉 찬 팝 곡이 '잔잔한 편'으로 나옴 — RMS dB 기준이 틀렸음]
+    pw_db = (lufs + 2.0) if lufs is not None and np.isfinite(lufs) else song_db
+    mood = _mood(stats.get("조(키, 추정)"), tempo, pw_db, float(np.median(f["cent"])))
     lines = [f"# 곡 설명 — {os.path.basename(path)}", ""]
     lines.append(f"**한 줄 느낌(추정):** {mood}")
     lines.append(f"- 길이 {fmt_t(dur)} / 조 {stats.get('조(키, 추정)', '?')} / 빠르기 약 {tempo:.0f} BPM (반이나 두 배일 수 있음)")
