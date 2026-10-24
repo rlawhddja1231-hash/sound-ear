@@ -5,6 +5,8 @@
   python3 listen.py check  노래.wav [--mode vocal|mix|auto] [--out 폴더]
   python3 listen.py cut    노래.wav 1:23.5 [--len 2] [--out 폴더]
   python3 listen.py compare 앞판.wav 새판.wav [--out 폴더]
+  python3 listen.py describe 노래.wav [--words 가사폴더/words.json] [--out 폴더]
+  python3 listen.py words  노래.wav [--lang ko] [--model ggml-small-q5_1.bin] [--out 폴더]
 
 check   : 소리 전체를 검사해 보고서(보고서.md, result.json)와 그림을 만든다.
 cut     : 정한 시각 앞뒤를 잘라 소리 조각과 확대 그림을 만든다.
@@ -829,6 +831,473 @@ def cmd_compare(args):
     print("\n".join(lines[:8]))
 
 
+# ---------------------------------------------------------------- 받아쓰기 (말·가사)
+def find_whisper_model(explicit=None):
+    """ggml whisper 모델 파일을 찾는다: --model, 환경변수 SOUND_EAR_MODEL, 흔한 폴더 순서."""
+    import glob
+    cands = []
+    if explicit:
+        cands.append(explicit)
+    if os.environ.get("SOUND_EAR_MODEL"):
+        cands.append(os.environ["SOUND_EAR_MODEL"])
+    pats = ["ggml-*.bin"]
+    dirs = [os.getcwd(), os.path.expanduser("~/.cache/sound-ear"), os.path.expanduser("~/.cache/whisper"),
+            "/mnt/user-data/uploads", "/mnt/user-data/uploads/Downloads", os.path.expanduser("~/Downloads")]
+    for d in dirs:
+        for pat in pats:
+            cands += sorted(glob.glob(os.path.join(d, pat)), key=lambda f: -os.path.getsize(f))
+    for c in cands:
+        if c and os.path.isfile(c):
+            return c
+    return None
+
+
+def transcribe(path, model_path, lang="auto", threads=None, prompt=None):
+    """whisper.cpp로 받아쓰기. 16kHz 모노로 풀어서 넣는다. [(시작초, 끝초, 글)]"""
+    from pywhispercpp.model import Model
+    r = subprocess.run(["ffmpeg", "-v", "error", "-i", path, "-vn", "-f", "f32le", "-ac", "1", "-ar", "16000", "-"],
+                       capture_output=True)
+    y = np.frombuffer(r.stdout, np.float32)
+    params = dict(language=lang if lang != "auto" else "", print_progress=False, print_realtime=False,
+                  n_threads=threads or max(1, os.cpu_count() or 1), suppress_blank=True, no_context=False)
+    if prompt:
+        params["initial_prompt"] = prompt
+    m = Model(model_path, redirect_whispercpp_logs_to=None, **params)
+    segs = m.transcribe(y)
+    out = []
+    for sg in segs:
+        txt = sg.text.strip()
+        if not txt:
+            continue
+        out.append((sg.t0 / 100.0, sg.t1 / 100.0, txt))
+    return out
+
+
+def clean_segments(segs):
+    """whisper가 음악에서 자주 지어내는 것(같은 줄 반복, 자막 인사, 음표만)을 걸러 표시한다."""
+    import re
+    junk = re.compile(r"(구독|좋아요|시청해 주셔서|자막|MBC|KBS|SBS|thank you for watching|subscribe|ご視聴|字幕)", re.I)
+    res = []
+    prev = None
+    rep = 0
+    for a, b, t in segs:
+        flag = ""
+        if junk.search(t):
+            flag = "지어낸 말일 수 있음"
+        if re.fullmatch(r"[\s♪♫~.\-…()\[\]]*", t) or re.fullmatch(r"\s*[\[(（【].{0,12}[\])）】]\s*", t):
+            continue  # 음표만, 또는 [끝] (음악) 같은 괄호 표시
+        if prev is not None and t == prev:
+            rep += 1
+            if rep >= 2:
+                flag = flag or "같은 줄 반복(지어낸 말일 수 있음)"
+        else:
+            rep = 0
+        prev = t
+        res.append((a, b, t, flag))
+    return res
+
+
+def cmd_words(args):
+    model = find_whisper_model(args.model)
+    if not model:
+        sys.exit("받아쓰기 모델(ggml-*.bin)을 못 찾았습니다. --model 로 경로를 주거나 SOUND_EAR_MODEL 환경변수를 정하세요.\n"
+                 "받는 곳: https://huggingface.co/ggerganov/whisper.cpp (예: ggml-small-q5_1.bin)")
+    src = args.file
+    tmp = None
+    if args.start is not None or args.end is not None:
+        t0 = parse_t(args.start) if args.start else 0.0
+        tmp = os.path.join(os.path.dirname(os.path.abspath(args.out or ".")) or ".", "_cut_for_words.wav")
+        cmd = ["ffmpeg", "-v", "error", "-y", "-ss", str(t0)]
+        if args.end:
+            cmd += ["-to", str(parse_t(args.end))]
+        subprocess.run(cmd + ["-i", src, "-ac", "1", "-ar", "16000", tmp], check=True)
+        src = tmp
+    else:
+        t0 = 0.0
+    import time
+    st = time.time()
+    segs = transcribe(src, model, lang=args.lang, prompt=args.prompt)
+    took = time.time() - st
+    if tmp:
+        os.remove(tmp)
+    segs = clean_segments([(a + t0, b + t0, t) for a, b, t in segs])
+    out = args.out or (os.path.splitext(os.path.basename(args.file))[0] + "_가사")
+    os.makedirs(out, exist_ok=True)
+    lines = [f"# 받아쓰기 — {os.path.basename(args.file)}", "",
+             f"- 모델: {os.path.basename(model)} / 언어: {args.lang} / 걸린 시간: {took:.0f}초",
+             "- 노래 가사는 반주·효과 때문에 틀리기 쉽습니다. **보컬만 있는 파일**일수록 정확합니다.",
+             "- '지어낸 말일 수 있음' 표시는 음악 구간에서 AI가 흔히 지어내는 말입니다.", ""]
+    for a, b, t, flag in segs:
+        lines.append(f"- **{fmt_t(a)}~{fmt_t(b)}** {t}" + (f"  _({flag})_" if flag else ""))
+    rp = os.path.join(out, "가사.md")
+    open(rp, "w", encoding="utf-8").write("\n".join(lines))
+    json.dump([dict(start=a, end=b, text=t, flag=f) for a, b, t, f in segs],
+              open(os.path.join(out, "words.json"), "w", encoding="utf-8"), ensure_ascii=False, indent=1)
+    srt = []
+    for i, (a, b, t, f) in enumerate(segs, 1):
+        def ts(x):
+            h = int(x // 3600); m_ = int(x % 3600 // 60); s_ = x % 60
+            return f"{h:02d}:{m_:02d}:{int(s_):02d},{int((s_ % 1) * 1000):03d}"
+        srt += [str(i), f"{ts(a)} --> {ts(b)}", t, ""]
+    open(os.path.join(out, "자막.srt"), "w", encoding="utf-8").write("\n".join(srt))
+    print(f"[완료] {rp} (줄 {len(segs)}개, {took:.0f}초)")
+    for a, b, t, flag in segs[:40]:
+        print(f"  {fmt_t(a)} {t}" + (f"  ({flag})" if flag else ""))
+
+
+# ---------------------------------------------------------------- 곡 설명 (구성·악기·분위기)
+def _feat_frames(y, sr, hop):
+    import librosa
+    S = np.abs(librosa.stft(y, n_fft=2048, hop_length=hop))
+    freqs = librosa.fft_frequencies(sr=sr, n_fft=2048)
+    H, P = librosa.decompose.hpss(S, margin=2.0)
+    tot = (S ** 2).sum(axis=0) + 1e-12
+    perc = (P ** 2).sum(axis=0) / tot
+    low = (S[freqs < 150] ** 2).sum(axis=0) / tot
+    mid = (S[(freqs >= 200) & (freqs < 3000)] ** 2).sum(axis=0) / tot
+    cent = librosa.feature.spectral_centroid(S=S, sr=sr)[0]
+    rms = librosa.feature.rms(S=S, frame_length=2048)[0]
+    onset = librosa.onset.onset_strength(S=librosa.amplitude_to_db(P, ref=np.max), sr=sr)
+    return dict(S=S, H=H, perc=perc, low=low, mid=mid, cent=cent, rms=rms, onset=onset[: len(rms)])
+
+
+def _segments(y, sr, hop, dur):
+    """곡을 덩어리로 나누고(소리가 바뀌는 곳 찾기), 닮은 덩어리끼리 같은 글자(A, B, C…)를 붙인다."""
+    import librosa
+    from scipy.ndimage import median_filter
+    from scipy.signal import find_peaks
+    tempo, beats = librosa.beat.beat_track(y=y, sr=sr, hop_length=hop)
+    tempo = float(np.atleast_1d(tempo)[0])
+    if len(beats) < 32:
+        beats = np.arange(0, int(dur * sr / hop), int(0.5 * sr / hop))
+    chroma = librosa.feature.chroma_cqt(y=y, sr=sr, hop_length=hop)
+    mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=20, hop_length=hop)[1:]
+    rms = librosa.amplitude_to_db(librosa.feature.rms(y=y, hop_length=hop), ref=np.max)
+    C = librosa.util.sync(chroma, beats, aggregate=np.median)
+    M = librosa.util.sync(mfcc, beats, aggregate=np.mean)
+    E = librosa.util.sync(rms, beats, aggregate=np.mean)
+    bt = librosa.frames_to_time(np.concatenate([[0], beats]), sr=sr, hop_length=hop)
+    n = C.shape[1]
+    beat_s = dur / max(n, 1)
+
+    def zs(X):
+        return (X - X.mean(axis=1, keepdims=True)) / (X.std(axis=1, keepdims=True) + 1e-9)
+    F = np.vstack([zs(C), zs(M) * 0.8, zs(E) * 1.5])
+    Fn = F / (np.linalg.norm(F, axis=0, keepdims=True) + 1e-9)
+    SSM = Fn.T @ Fn
+    # Foote 체커보드 커널로 '여기서 소리가 바뀐다' 곡선
+    L = int(np.clip(round(6.0 / beat_s), 4, 24))
+    g = np.outer(np.hanning(2 * L), np.hanning(2 * L))
+    K = g * np.kron(np.array([[1, -1], [-1, 1]]), np.ones((L, L)))
+    pad = np.pad(SSM, L, mode="edge")
+    nov = np.array([np.sum(pad[i:i + 2 * L, i:i + 2 * L] * K) for i in range(n)])
+    nov = np.maximum(nov, 0)
+    nov = nov / (nov.max() + 1e-9)
+    want = int(np.clip(round(dur / 16.0), 4, 20))
+    dist = max(1, int(round(7.0 / beat_s)))
+    pk, pr = find_peaks(nov, distance=dist, prominence=0.04)
+    if len(pk) > want - 1:
+        pk = np.sort(pk[np.argsort(pr["prominences"])[::-1][: want - 1]])
+    bnd = [0] + [int(p) for p in pk] + [n]
+    segs = []
+    for i in range(len(bnd) - 1):
+        a, b = bnd[i], bnd[i + 1]
+        if b - a < 1:
+            continue
+        ta = 0.0 if a == 0 else bt[min(a, len(bt) - 1)]
+        tb = dur if b >= n else bt[min(b, len(bt) - 1)]
+        segs.append([ta, tb, a, b])
+    # 닮은꼴: 반복 찾기 행렬(시간 지연을 넣은 chroma의 이웃 관계)에서 두 덩어리 사이 '대각선 줄'이 길게 이어지면 같은 반복
+    Cs = librosa.feature.stack_memory(C, n_steps=4)
+    R = librosa.segment.recurrence_matrix(Cs, width=3, mode="affinity", sym=True)
+    R = librosa.segment.path_enhance(R, 9) if n > 20 else R
+    m = len(segs)
+    sim = np.eye(m)
+    for i in range(m):
+        for j in range(i + 1, m):
+            a1, b1, a2, b2 = segs[i][2], segs[i][3], segs[j][2], segs[j][3]
+            B = R[a1:b1, a2:b2]
+            if B.size == 0:
+                continue
+            need = max(2, int(0.5 * min(b1 - a1, b2 - a2)))
+            best = 0.0
+            for k in range(-(B.shape[0] - 1), B.shape[1]):
+                d = np.diagonal(B, offset=k)
+                if len(d) >= need:
+                    best = max(best, float(np.mean(d)))
+            sim[i, j] = sim[j, i] = best
+    segs_sim = sim
+    off = sim[np.triu_indices(m, 1)] if m > 1 else np.array([0.0])
+    thr = max(0.25, float(np.percentile(off, 85))) if m > 2 else 1.0
+    labels = [-1] * m
+    nxt = 0
+    for i in range(m):
+        if labels[i] >= 0:
+            continue
+        labels[i] = nxt
+        for j in range(i + 1, m):
+            if labels[j] < 0 and sim[i, j] >= thr:
+                labels[j] = nxt
+        nxt += 1
+    return [(sg[0], sg[1], chr(ord("A") + min(l, 25))) for sg, l in zip(segs, labels)], tempo, segs_sim
+
+
+def _mood(stats_key, tempo, energy_db, cent_hz):
+    minor = "마이너" in (stats_key or "")
+    color = "어둡고 진지한 느낌" if minor else "밝은 느낌"
+    if tempo >= 140:
+        sp = "빠르게 몰아치는"
+    elif tempo >= 110:
+        sp = "경쾌하게 달리는"
+    elif tempo >= 85:
+        sp = "보통 빠르기의"
+    else:
+        sp = "느리고 차분한"
+    pw = "세고 꽉 찬" if energy_db > -12 else ("힘 있는" if energy_db > -16 else "잔잔한")
+    tone = ""
+    if cent_hz > 3000:
+        tone = ", 높은 소리가 많아 반짝임"
+    elif cent_hz < 1500:
+        tone = ", 낮은 소리가 많아 묵직함"
+    return f"{color}의 {sp} 곡, 소리는 {pw} 편{tone}"
+
+
+def cmd_describe(args):
+    """곡을 '사람이 듣듯이' 설명한다: 구성(전주·절·후렴…), 악기 있는지, 세기 변화, 분위기, 가사."""
+    import librosa
+    path = args.file
+    out = args.out or (os.path.splitext(os.path.basename(path))[0] + "_곡설명")
+    os.makedirs(out, exist_ok=True)
+    st, sr0 = load(path)
+    sr = 22050
+    y = librosa.resample(st.mean(axis=1), orig_sr=sr0, target_sr=sr)
+    dur = len(y) / sr
+    hop = 512
+    stats = {}
+    estimate_key_tempo(y, sr, stats, [])
+    stats.pop("_scale", None)
+    f = _feat_frames(y, sr, hop)
+    ft = librosa.frames_to_time(np.arange(len(f["rms"])), sr=sr, hop_length=hop)
+    rms_db = db(f["rms"])
+    song_db = float(np.percentile(rms_db, 90))
+
+    # 가사(말) — 모델이 있으면 받아쓰기, 이미 한 결과(words.json)가 있으면 그걸 씀
+    words = []
+    wj = args.words
+    if wj and os.path.isfile(wj):
+        words = [(w["start"], w["end"], w["text"], w.get("flag", "")) for w in json.load(open(wj, encoding="utf-8"))]
+    elif not args.no_words:
+        model = find_whisper_model(args.model)
+        if model:
+            print("가사 받아쓰는 중… (4분 곡에 약 2분)")
+            words = clean_segments(transcribe(path, model, lang=args.lang))
+            json.dump([dict(start=a, end=b, text=t, flag=fl) for a, b, t, fl in words],
+                      open(os.path.join(out, "words.json"), "w", encoding="utf-8"), ensure_ascii=False, indent=1)
+    voc = np.zeros(len(ft), bool)
+    for a, b, t, fl in words:
+        if not fl:
+            voc |= (ft >= a) & (ft < b)
+    have_words = bool(words)
+
+    segs, tempo, ssim = _segments(y, sr, hop, dur)
+    mg = []
+    for sgm in segs:  # 이웃한 같은 글자 덩어리 중 짧은 것(10초 미만)만 앞에 붙임 — 긴 반복은 따로 보여 준다
+        if mg and mg[-1][2] == sgm[2] and (sgm[1] - sgm[0] < 10 or mg[-1][1] - mg[-1][0] < 10):
+            mg[-1] = (mg[-1][0], sgm[1], sgm[2])
+        else:
+            mg.append(sgm)
+    segs = mg
+    rows = []
+    for (a, b, lab) in segs:
+        m = (ft >= a) & (ft < b)
+        if not m.any():
+            continue
+        e = float(np.percentile(rms_db[m], 75))  # 숨·쉼표 같은 빈틈에 끌려 내려가지 않게 위쪽 값으로
+        perc = float(np.mean(f["perc"][m]))
+        low = float(np.mean(f["low"][m]))
+        ons = float(np.mean(f["onset"][m])) if len(f["onset"]) == len(m) else 0.0
+        vfrac = float(np.mean(voc[m])) if have_words else None
+        txt = [t for (wa, wb, t, fl) in words if not fl and a <= (wa + wb) / 2 < b]
+        rows.append(dict(a=a, b=b, lab=lab, e=e, perc=perc, low=low, ons=ons, v=vfrac, words=" / ".join(txt)))
+    if not rows:
+        sys.exit("구간을 나누지 못했습니다(소리가 너무 짧음).")
+
+    # 악기 있는지(상대 비교)
+    # 드럼: 때리는 소리만 뽑아(HPSS) 그 '때림'이 박자마다 규칙적으로 반복되는지(자기상관)로 본다.
+    # [확인: 10-24 세기 비율만 쓰니 전부 '없음' → 규칙성으로 바꾸자 보컬만 있는 곡 0.25~0.28, 드럼 있는 곡 0.5~0.9로 갈림]
+    yh, yp = librosa.effects.hpss(y, margin=3.0)
+    env = librosa.onset.onset_strength(y=yp, sr=sr, hop_length=hop)
+    lag = int(round(60.0 / max(tempo, 40) * sr / hop))
+    prms = librosa.feature.rms(y=yp, hop_length=hop)[0]
+    hrms = librosa.feature.rms(y=yh, hop_length=hop)[0] + 1e-9
+    et = librosa.frames_to_time(np.arange(len(env)), sr=sr, hop_length=hop)
+    low_top = float(np.percentile(f["low"], 90))
+    for r in rows:
+        mm = (et >= r["a"]) & (et < r["b"])
+        e = env[mm] - env[mm].mean() if mm.sum() > 4 * lag else None
+        reg = 0.0
+        if e is not None and np.any(e):
+            ac = np.correlate(e, e, "full")[len(e) - 1:]
+            ac = ac / (ac[0] + 1e-9)
+            cands = [ac[max(1, lag // 2 - 2): lag // 2 + 3].max() if lag // 2 + 3 < len(ac) else 0,
+                     ac[max(1, lag - 2): lag + 3].max() if lag + 3 < len(ac) else 0]
+            reg = float(max(cands))
+        ph = float(20 * np.log10(prms[mm].mean() / hrms[mm].mean())) if mm.any() else -99
+        r["reg"] = reg
+        r["drums"] = reg >= 0.45 and ph > -26
+        r["bass"] = r["low"] > max(0.05, 0.45 * low_top)
+
+    # 이름 붙이기 — 노래 없는 곳은 전주·간주·후주, 노래 있는 곳은 글자+몇 번째 반복.
+    # '후렴'은 반복되면서 다른 노래 부분보다 확실히(1.5dB 넘게) 셀 때만 붙인다
+    # [확인: 10-24 「마법이 사라진 세상에서」는 같은 멜로디를 여러 번 부르는 곡이라 '가장 많이 반복'을 후렴이라 부르면 틀림]
+    from collections import defaultdict
+    def sings(r):
+        return (r["v"] > 0.25) if r["v"] is not None else (r["e"] > song_db - 10)
+    by = defaultdict(list)
+    for r in rows:
+        if sings(r):
+            by[r["lab"]].append(r)
+    chorus = None
+
+    def bigr(t):
+        t = "".join(ch for ch in t.lower() if ch.isalnum())
+        return {t[i:i + 2] for i in range(len(t) - 1)}
+    # 1순위: 같은 멜로디(같은 글자)가 '같은 가사'로 반복되면 후렴. 멜로디는 같고 가사가 다르면 절(벌스).
+    # [확인: 10-24 Gumi 「Pray To Me」의 'Now pray to me' 부분은 세기만으로는 못 찾았는데 가사 반복으로 찾힘]
+    if have_words:
+        best = None
+        for lab, rs in by.items():
+            if len(rs) < 2:
+                continue
+            sims = []
+            for i in range(len(rs)):
+                for j in range(i + 1, len(rs)):
+                    A, B = bigr(rs[i]["words"]), bigr(rs[j]["words"])
+                    if A and B:
+                        sims.append(len(A & B) / len(A | B))
+            if sims and max(sims) >= 0.35:
+                sc = np.mean([x["e"] for x in rs]) + 3 * max(sims)
+                if best is None or sc > best[0]:
+                    best = (sc, lab)
+        if best:
+            chorus = best[1]
+    if chorus is None and len(by) >= 2:
+        means = {lab: np.mean([x["e"] for x in rs]) for lab, rs in by.items()}
+        rep = [lab for lab, rs in by.items() if len(rs) >= 2]
+        if rep:
+            top = max(rep, key=lambda l: means[l])
+            others = [means[l] for l in means if l != top]
+            if others and means[top] >= max(others) - 0.5 and means[top] >= np.mean(others) + 1.5:
+                chorus = top
+    count = defaultdict(int)
+    total = {lab: sum(1 for r in rows if r["lab"] == lab) for lab in set(r["lab"] for r in rows)}
+    names = []
+    for i, r in enumerate(rows):
+        count[r["lab"]] += 1
+        k = count[r["lab"]]
+        if not sings(r):
+            before_first = all(not sings(x) for x in rows[:i])
+            nm = "전주" if before_first else ("후주(끝)" if i == len(rows) - 1 else "간주(노래 없음)")
+        elif r["lab"] == chorus:
+            nm = f"후렴 {k}번째" if total[r["lab"]] > 1 else "후렴"
+        elif r["e"] < song_db - 9:
+            nm = f"조용한 노래 부분 {r['lab']}"
+        else:
+            nm = f"노래 {r['lab']}" + (f" ({k}번째 반복)" if total[r["lab"]] > 1 and k > 1 else "")
+        names.append(nm)
+
+    mood = _mood(stats.get("조(키, 추정)"), tempo, song_db, float(np.median(f["cent"])))
+    lines = [f"# 곡 설명 — {os.path.basename(path)}", ""]
+    lines.append(f"**한 줄 느낌(추정):** {mood}")
+    lines.append(f"- 길이 {fmt_t(dur)} / 조 {stats.get('조(키, 추정)', '?')} / 빠르기 약 {tempo:.0f} BPM (반이나 두 배일 수 있음)")
+    if not have_words:
+        lines.append("- 가사 받아쓰기 모델이 없어 노래가 있는지는 소리 세기로만 짐작했습니다.")
+    lines += ["", "## 흐름", "", "| 시각 | 구간(추정) | 닮은꼴 | 세기 | 드럼 | 저음 | 노래 | 가사 |", "|---|---|---|---|---|---|---|---|"]
+    prev_e = None
+    story = []
+    for r, nm in zip(rows, names):
+        bar = "█" * int(np.clip((r["e"] - song_db + 24) / 3, 1, 8))
+        v = "-" if r["v"] is None else ("있음" if r["v"] > 0.25 else "없음")
+        w = (r["words"][:60] + "…") if len(r["words"]) > 60 else r["words"]
+        lines.append(f"| {fmt_t(r['a'])}~{fmt_t(r['b'])} | {nm} | {r['lab']} | {bar} | {'O' if r['drums'] else '·'} | {'O' if r['bass'] else '·'} | {v} | {w} |")
+        change = ""
+        if prev_e is not None:
+            d = r["e"] - prev_e
+            change = "확 커지며 " if d > 4 else ("살짝 커지며 " if d > 2 else ("확 작아지며 " if d < -4 else ("살짝 작아지며 " if d < -2 else "")))
+        parts = []
+        if r["drums"]:
+            parts.append("드럼")
+        if r["bass"]:
+            parts.append("묵직한 저음")
+        inst = (" 과 ".join(parts).replace(" 과 ", "과 ") + "이 깔리고") if parts else "드럼 없이 가볍게"
+        story.append(f"- **{fmt_t(r['a'])}** {change}{nm} — {inst}" + (f", 노래: “{r['words'][:40]}”" if r["words"] else ""))
+        prev_e = r["e"]
+    lines += ["", "## 들은 대로 말하면", ""] + story
+    reps = sorted({r["lab"] for r in rows if total[r["lab"]] > 1})
+    if reps:
+        lines.insert(4, "- 반복되는 부분: " + ", ".join(f"{l}({total[l]}번)" for l in reps) + (f" — 그중 {chorus}가 같은 가사·멜로디로 반복되고 세서 후렴으로 봤습니다" if chorus else " — 다른 부분보다 확 센 반복이 없어 후렴은 정하지 않았습니다"))
+    lines += ["", "※ 구간 이름·분위기·악기는 소리 특징으로 짐작한 것입니다. 닮은꼴 글자가 같으면 비슷한 멜로디·화음의 반복입니다.",
+              "※ 악기는 '드럼(때리는 소리)'과 '저음(베이스·킥)'만 가려냅니다. 피아노·기타 같은 악기 이름은 아직 못 맞힙니다."]
+    if have_words:
+        # 반복되는 가사(훅·후렴구): 비슷한 줄이 다른 시각에 또 나오면 묶어서 보여 준다
+        good = [(a, b, t) for a, b, t, fl in words if not fl and len(t) >= 6]
+        used = set()
+        hooks = []
+        for i in range(len(good)):
+            if i in used:
+                continue
+            grp = [i]
+            for j in range(i + 1, len(good)):
+                if j in used:
+                    continue
+                A, B = bigr(good[i][2]), bigr(good[j][2])
+                if A and B and len(A & B) / len(A | B) >= 0.45 and abs(good[j][0] - good[i][0]) > 5:
+                    grp.append(j)
+            if len(grp) >= 2:
+                used.update(grp)
+                hooks.append(grp)
+        if hooks:
+            lines += ["", "## 반복되는 가사 (훅·후렴구 후보)", ""]
+            for grp in hooks[:8]:
+                t = good[grp[0]][2]
+                lines.append(f"- “{t[:50]}” — " + ", ".join(fmt_t(good[k][0]) for k in grp))
+        lines += ["", "## 가사(받아쓰기)", ""] + [f"- {fmt_t(a)} {t}" + (f" _({fl})_" if fl else "") for a, b, t, fl in words]
+    rp = os.path.join(out, "곡설명.md")
+    open(rp, "w", encoding="utf-8").write("\n".join(lines))
+    json.dump(dict(mood=mood, tempo=tempo, key=stats.get("조(키, 추정)"),
+                   sections=[dict(start=r["a"], end=r["b"], name=nm, label=r["lab"], energy_db=r["e"], drums=bool(r["drums"]),
+                                  bass=bool(r["bass"]), vocals=r["v"], words=r["words"]) for r, nm in zip(rows, names)]),
+              open(os.path.join(out, "describe.json"), "w", encoding="utf-8"), ensure_ascii=False, indent=1)
+
+    # 그림: 세기 곡선 + 구간 색 띠 + 노래 있는 곳
+    plt = setup_plt()
+    fig, ax = plt.subplots(2, 1, figsize=(16, 6), sharex=True, gridspec_kw=dict(height_ratios=[3, 1]))
+    sm = np.convolve(rms_db, np.ones(20) / 20, mode="same")
+    ax[0].plot(ft, sm, color="black", lw=1)
+    cols = plt.get_cmap("tab10")
+    for r, nm in zip(rows, names):
+        ci = ord(r["lab"]) - ord("A")
+        ax[0].axvspan(r["a"], r["b"], color=cols(ci % 10), alpha=0.18)
+        ax[0].text((r["a"] + r["b"]) / 2, sm.max() + 1, f"{r['lab']}\n{nm.split('(')[0]}", ha="center", va="bottom", fontsize=8)
+        ax[1].axvspan(r["a"], r["b"], ymin=0.55, ymax=0.95, color="tab:red" if r["drums"] else "white", alpha=0.5)
+        ax[1].axvspan(r["a"], r["b"], ymin=0.05, ymax=0.45, color="tab:blue" if r["bass"] else "white", alpha=0.5)
+    if have_words:
+        ax[0].fill_between(ft, sm.min() - 1, sm.min() + 1, where=voc, color="green", alpha=0.6, label="노래")
+        ax[0].legend(loc="lower right")
+    ax[0].set_ylim(sm.min() - 2, sm.max() + 6)
+    ax[0].set_ylabel("세기(dB)")
+    ax[0].set_title(f"곡 흐름 — {os.path.basename(path)}  |  {mood}")
+    ax[1].set_yticks([0.25, 0.75])
+    ax[1].set_yticklabels(["저음", "드럼"])
+    ax[1].set_xlabel("시간(초)")
+    fig.tight_layout()
+    ip = os.path.join(out, "곡흐름.png")
+    fig.savefig(ip, dpi=80)
+    plt.close(fig)
+    print(f"[완료] {rp}\n       그림: {ip}")
+    print("\n".join(lines[:4 + 4 + len(rows)]))
+
+
 def main():
     ap = argparse.ArgumentParser(description="소리 듣기 도구")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -845,6 +1314,23 @@ def main():
     k.add_argument("--mode", default="auto", choices=["auto", "vocal", "mix"])
     k.add_argument("--out")
     k.set_defaults(fn=cmd_cut)
+    w = sub.add_parser("words", help="말·가사 받아쓰기 (whisper.cpp)")
+    w.add_argument("file")
+    w.add_argument("--model", help="ggml-*.bin 경로")
+    w.add_argument("--lang", default="auto", help="ko, ja, en ... (기본: 자동)")
+    w.add_argument("--prompt", help="힌트 글(곡 제목, 자주 나오는 단어)")
+    w.add_argument("--start")
+    w.add_argument("--end")
+    w.add_argument("--out")
+    w.set_defaults(fn=cmd_words)
+    d = sub.add_parser("describe", help="곡 설명: 구성·드럼·저음·세기·분위기·가사")
+    d.add_argument("file")
+    d.add_argument("--model")
+    d.add_argument("--lang", default="auto")
+    d.add_argument("--words", help="이미 받아쓴 words.json")
+    d.add_argument("--no-words", action="store_true")
+    d.add_argument("--out")
+    d.set_defaults(fn=cmd_describe)
     m = sub.add_parser("compare")
     m.add_argument("a")
     m.add_argument("b")

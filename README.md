@@ -16,6 +16,8 @@ Claude는 귀가 없습니다. **sound-ear**는 노래·보컬·효과음·영�
 | 잡음·편집 | 딸깍·틱 소리, 뚝 끊김, 시작·끝 잘림, 바탕 잡음, 좌우 위상 반대 |
 | 보컬 (보컬만 있는 파일) | 음정 어긋남(센트 단위), **음이 순간 튐**(피치 글리치), 음 흔들림, 조에 없는 음, 센 ㅅ·ㅊ 소리, 큰 숨소리, 음역 |
 | 곡 정보 | 빠르기(BPM), 조(키) — 추정 |
+| **가사·말 받아쓰기** | 노래 가사·대사를 시각과 함께 글로, 자막 파일(.srt)도 (Whisper) |
+| **곡 설명** | 전주·절·후렴·간주 같은 구성, 반복되는 부분, 드럼·저음이 있는지, 세기 변화, 분위기, 반복되는 가사(훅) |
 
 그리고 문제마다 **확대 그림**과 **그 부분만 자른 소리 조각**을 만들어서 바로 들어 볼 수 있게 합니다. 고친 뒤에는 **앞판·새판 비교**도 합니다.
 
@@ -44,17 +46,20 @@ Claude는 귀가 없습니다. **sound-ear**는 노래·보컬·효과음·영�
 - "이 노래 들어 보고 이상한 데 찾아 줘"
 - "보컬만 뽑은 거야. 음정이랑 음 튀는 데 봐 줘"
 - "고친 판이야. 전이랑 비교해 줘"
+- "이 노래 어떤 노래인지 설명해 줘" / "가사 받아 적어 줘"
+
+**가사 받아쓰기 준비(한 번만):** [whisper.cpp 모델](https://huggingface.co/ggerganov/whisper.cpp)에서 `ggml-small-q5_1.bin`(190MB)을 받아 Claude에게 주세요. 없어도 다른 기능은 다 됩니다.
 
 **팁:** 보컬 합성 노래는 **보컬만 따로 내보낸 wav + 완성곡 wav**를 같이 주면 가장 정확합니다. 반주가 섞이면 음정 검사가 틀립니다.
 
 ## 못 하는 것
 - 마이크로 실시간 듣기 (파일만)
-- 가사·발음 받아쓰기
+- 피아노·기타처럼 악기 이름 맞히기 (드럼·저음이 있는지만 압니다)
 - "좋은 노래인가" 같은 취향 판단
 - mp3·유튜브 녹음처럼 손실 압축된 파일에서는 클리핑을 참고로만 봅니다
 
 ## 필요한 것
-Python 3, ffmpeg, 그리고 `librosa soundfile pyloudnorm matplotlib koreanize-matplotlib scipy` (Claude가 알아서 설치합니다).
+Python 3, ffmpeg, 그리고 `librosa soundfile pyloudnorm matplotlib koreanize-matplotlib scipy` (Claude가 알아서 설치합니다). 가사 받아쓰기는 `pywhispercpp`와 모델 파일이 더 필요합니다.
 
 ## 직접 시험해 보기
 ```
@@ -76,6 +81,8 @@ python3 plugins/sound-ear/skills/sound-ear/tests/selftest.py
 - **Noise & edits:** clicks, abrupt cuts, cut-off start/end, noise floor, phase cancellation
 - **Vocals (vocal-only file):** off-pitch notes (in cents), pitch glitches, wobbly notes, out-of-key notes, harsh sibilance, loud breaths, vocal range
 - **Song info:** estimated BPM and key
+- **Lyrics/speech:** timestamped transcription and .srt subtitles (whisper.cpp; model file `ggml-small-q5_1.bin` from Hugging Face)
+- **Describe:** sections (intro, verse, chorus, breaks), repeats, drums and bass, loudness changes, mood, repeated lyric hooks
 
 For each finding it makes a close-up picture and a short audio snippet, and it can compare two versions after you fix things. Built for checking vocal-synth songs (Synthesizer V, VOCALOID, UTAU, CeVIO) before release. Report labels are Korean; Claude answers in your language.
 
@@ -88,7 +95,7 @@ For each finding it makes a close-up picture and a short audio snippet, and it c
 
 **Usage:** attach an audio file and ask "listen to this and find problems". For best pitch results, give a vocal-only export plus the full mix.
 
-**Limits:** files only (no live mic), no lyric transcription, no taste judgements; clipping on lossy files (mp3, opus) is advisory only.
+**Limits:** files only (no live mic), cannot name specific instruments, no taste judgements; clipping on lossy files (mp3, opus) is advisory only.
 
 **Self-test:** `python3 plugins/sound-ear/skills/sound-ear/tests/selftest.py` → `PASS`.
 

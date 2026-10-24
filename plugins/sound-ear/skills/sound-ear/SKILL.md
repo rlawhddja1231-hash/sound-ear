@@ -1,6 +1,6 @@
 ---
 name: sound-ear
-description: "Lets Claude 'hear' audio files. Turns songs, vocals, sound effects or video soundtracks into numbers and pictures (waveform, spectrogram, pitch curve) with a bundled script, then finds problems with timestamps: clicks, clipping, abrupt cuts, pitch glitches, off-pitch notes, wobbly notes, harsh sibilance, loud breaths, cut-off endings, loudness too high or low. Also estimates BPM, key and vocal range. Made for checking songs from vocal synths (Synthesizer V, VOCALOID, UTAU, CeVIO) before release. Use whenever the user shares an audio or video file (wav, mp3, flac, m4a, ogg, opus, webm, mp4) or asks to listen, check a mix, find glitches, measure BPM/key/loudness, or compare two versions. 소리 듣기: 노래 들어 봐, 검수, 음정, 음 튐, 딸깍, 잡음, 깨짐, 끊김, BPM, 키, 음역, 믹싱, 두 판 비교."
+description: "Lets Claude 'hear' audio files. Turns songs, vocals or video soundtracks into numbers and pictures with a bundled script, then finds problems with timestamps: clicks, clipping, abrupt cuts, pitch glitches, off-pitch notes, wobbly notes, harsh sibilance, loud breaths, cut-off endings, loudness too high or low. Also estimates BPM, key and vocal range, transcribes lyrics and speech with whisper.cpp, and describes a song the way a listener would: sections (intro, verses, chorus, breaks), repeats, drums and bass, loudness changes, mood and repeated lyric hooks. Built for checking vocal-synth songs (SynthV, VOCALOID, UTAU). Use whenever the user shares an audio or video file (wav, mp3, flac, m4a, ogg, opus, webm, mp4) or asks to listen, describe a song, get lyrics or subtitles, check a mix, find glitches, measure BPM/key/loudness, or compare two versions. 소리 듣기: 노래 들어 봐, 검수, 가사, 받아쓰기, 자막, 곡 구성, 후렴, 분위기, 음정, 음 튐, 딸깍, 잡음, 깨짐, 끊김, BPM, 키, 음역, 믹싱, 두 판 비교."
 license: MIT
 ---
 
@@ -8,7 +8,7 @@ license: MIT
 
 Claude has no ears. This skill turns an audio file into **numbers and pictures** with `scripts/listen.py`, so Claude can inspect it, point at exact timestamps, and explain how to fix each problem. Reply to the user in their own language (the report and chart labels are in Korean; translate them when the user writes in another language).
 
-What it cannot do: listen live through a microphone, transcribe lyrics, or judge taste. Pitch checks need a **vocal-only** file; with a full mix the accompaniment confuses pitch tracking.
+What it cannot do: listen live through a microphone, name specific instruments (piano vs guitar), or judge taste. Lyrics need a whisper model file (see setup). Pitch checks need a **vocal-only** file; with a full mix the accompaniment confuses pitch tracking.
 
 ## 1. Setup (once per session)
 
@@ -20,6 +20,8 @@ L="${CLAUDE_SKILL_DIR:-}/scripts/listen.py"
 [ -f "$L" ] || L=$(find / -name listen.py -path '*sound-ear*' 2>/dev/null | head -1)
 echo "$L"
 ```
+
+**Lyrics / speech (optional):** `pip install pywhispercpp` and a whisper.cpp model file `ggml-*.bin` from https://huggingface.co/ggerganov/whisper.cpp (recommended: `ggml-small-q5_1.bin`, 190 MB, MIT). Put it in `~/.cache/sound-ear/` or pass `--model`, or set `SOUND_EAR_MODEL`. If the sandbox cannot reach Hugging Face, ask the user to download the file and attach it. Without a model, `describe` still works but guesses where the singing is from loudness only.
 
 Self-test (optional, ~20 s): `python3 "$(dirname "$L")/../tests/selftest.py"` → should print `PASS` (7 planted problems found, none extra).
 
@@ -46,6 +48,23 @@ Self-test (optional, ~20 s): `python3 "$(dirname "$L")/../tests/selftest.py"` �
    python3 "$L" compare old.wav new.wav --out compare
    ```
    Say "before: N issues, now: M issues".
+
+## 2b. Hearing the song as a listener
+
+```bash
+python3 "$L" describe song.mp3 --out song_described          # transcribes too if a model is found
+python3 "$L" words song.mp3 --lang ko --out song_lyrics      # lyrics/speech only; also writes 자막.srt
+python3 "$L" describe song.mp3 --words song_lyrics/words.json # reuse an earlier transcription
+```
+
+`describe` writes `곡설명.md`, `describe.json` and `곡흐름.png`: a one-line mood guess, key and tempo, a timeline table (section, repeat letter, loudness bar, drums, bass, singing, lyrics), a plain-language "as heard" walkthrough, repeated lyric hooks, and the full lyrics. Open the picture before you speak.
+
+How it decides (so you can explain or overrule it):
+- **Sections**: novelty curve on beat-synchronous chroma + timbre + loudness; repeats are long diagonal stripes in a chroma recurrence matrix. Same letter = same melody/harmony.
+- **Chorus**: a repeated section whose repeats also share the *same lyrics* (same melody with different lyrics is a verse). Without lyrics it falls back to "repeated and clearly louder"; if neither holds it does not name a chorus.
+- **Drums**: percussive part (HPSS) hitting regularly on the beat (autocorrelation ≥ 0.45). Vocal-only tracks score ~0.25.
+- **Mood**: from key (major/minor), tempo, loudness and brightness — a rough guess; say so.
+- **Lyrics**: whisper.cpp; lines that look made up during instrumentals (subtitle credits, repeated lines) are flagged. Sung lyrics have mistakes, especially over loud backing; vocal-only files are much better. About 25–40 s per minute of audio on 2 CPU cores with the small model.
 
 ## 3. What each finding means and how to fix it
 

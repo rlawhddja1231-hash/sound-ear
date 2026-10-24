@@ -2,6 +2,15 @@
 
 Newest first. Record date, file type, what was found, false positives, misses, and threshold changes.
 
+## 2026-10-24 — lyrics and "describe" (listening like a person) — v1.2.0
+- Added `words` (whisper.cpp via pywhispercpp, ggml-small-q5_1) and `describe`.
+- Lyrics: Korean song 4:02 in 103 s, English song 3:24 and Japanese song 2:27 in ~2 min on 2 cores. English and Japanese came out almost word-perfect; Korean had a few misheard words over loud backing. Filter added for bracket tags like "[끝]".
+- Sections: agglomerative clustering gave one 1:45-long chunk → switched to a Foote novelty curve with peak picking. Repeat matching by mean feature similarity found almost no repeats → switched to diagonal stripes in a chroma recurrence matrix (stack_memory + path_enhance).
+- Chorus: "most repeated" was wrong on a strophic Korean song (same melody sung many times). Rule now: repeats with the same lyrics = chorus (found "Now pray to me" in the English song at both places); otherwise only if clearly louder; otherwise no chorus is named. Repeated lyric lines are listed separately as hook candidates.
+- Drums: fixed percussive-energy thresholds said "no drums" everywhere → beat-regularity of the percussive onset envelope: vocal-only 0.25–0.28, drummed sections 0.5–0.9. Threshold 0.45.
+- Section loudness uses the 75th percentile so breaths/gaps in vocal-only tracks don't make every section "quiet".
+- Self-test 7/7 PASS.
+
 ## 2026-10-24 — vocal-only synth recordings + one more synth mix — v1.1.0
 - Tested on three vocal-synth tracks: a Synthesizer V vocal-only demo (1:27), a Kasane Teto vocal-only track (3:40, with harmonies), and a Synthesizer V full mix (3:24). All lossy (opus) recordings.
 - Pitch glitches: the first vocal-only run flagged 39 "glitches", almost all false. Fixes, in order: (1) only count glitches where the level is ≥60 % of the phrase median (was 30 %) — note tails gliding down were flagged; (2) octave jumps (12/19/24 semitones) during quieter frames are pitch-tracker confusion; (3) verify with the spectrum: the new pitch's harmonics must beat the old pitch's, there must be no strong partial an octave below, the old fundamental must actually disappear, and the new fundamental must actually exist; (4) a glitch needs an abrupt step (>2 semitones between 5.8 ms frames) — smooth V-shaped dips at note joins are natural; (5) skip very quiet voiced chunks (breaths); (6) if ≥4 raw candidates fall within ±0.5 s the pitch is unreliable (harmony/noise) — counted separately. Result: 39 → 0 on the clean demo, 6 → 0 on the harmony track; self-test still finds the planted 45 ms glitch.
