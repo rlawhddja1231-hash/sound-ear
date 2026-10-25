@@ -79,6 +79,9 @@ python3 plugins/sound-ear/skills/sound-ear/tests/mixtest.py
 ```
 흠 7개를 넣은 시험 노래를 만들어 다 찾는지 봅니다. `PASS`가 나오면 정상입니다.
 
+## 바뀐 것
+판마다 바뀐 내용은 [CHANGELOG.md](CHANGELOG.md)에 있습니다.
+
 ## 헛짚었거나 놓쳤을 때
 실제 노래로 써 보고 틀린 곳이 있으면 [Issues](https://github.com/rlawhddja1231-hash/sound-ear/issues)에 시각과 함께 알려 주세요. 기준값을 고쳐 나갑니다.
 
@@ -116,5 +119,7 @@ For each finding it makes a close-up picture and a short audio snippet, and it c
 **Limits:** files only (no live mic), no taste judgements; clipping on lossy files (mp3, opus) is advisory only.
 
 **Self-test:** `python3 plugins/sound-ear/skills/sound-ear/tests/selftest.py` → `PASS`.
+
+**Changelog:** [CHANGELOG.md](CHANGELOG.md)
 
 License: MIT
