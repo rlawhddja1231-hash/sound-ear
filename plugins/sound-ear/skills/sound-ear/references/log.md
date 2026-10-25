@@ -2,6 +2,15 @@
 
 Newest first. Record date, file type, what was found, false positives, misses, and threshold changes.
 
+## 2026-10-25 — one-command full report, medium lyrics model, better chorus — v1.5.0
+- `full` command and `종합보고서.md`. On "Alone" (4:26): ~9.5 min with the medium model (separation cached), 0 must-fix, 1 true-peak note.
+- Medium model (ggml-medium-q5_0, 539 MB, SHA256 19fea4b3…) on the separated vocal: the first verse that small turned into "[끝]" / subtitle junk came out as real lyrics, and many lines improved ("보랏빛 하늘로 피어나는데", "그런 소망 따라 흩날리는 무수한 나비"). ~1.6× real time vs ~0.4× for small. Largest model is the default; `--fast` picks the smallest.
+- Gap filling now re-transcribes only stretches where the vocal stem is audible but no words came out (was: the whole mix again).
+- Junk filter: bracketed song titles up to 40 chars, "한국어 노래가 정말 잘 어울려요"-type prompt echoes, stretched syllables.
+- Chorus: back-to-back repeats count once (a chorus must return after other parts); a shared hook line (≥ 0.5 bigram similarity) between repeats counts. Result: Alone → G (4×), Pray To Me → "Now pray to me" (unchanged), 마법이 사라진 세상에서 → the "마법과 함께라면" sections (3×) — before, the last two had no chorus.
+- Sections: percussive level added to novelty features; at least 5 parts for short songs. New `tests/mixtest.py` (synthetic song) checks drumless intro, drums, chorus repeat and loudness.
+- Off-pitch: notes that glide (pitch std > 25 cents) are expression, not errors; threshold 32 cents.
+
 ## 2026-10-25 — vocal separation — v1.4.0
 - Added `separate` (UVR MDX-Net Kim_Vocal_2.onnx via onnxruntime, single pass; `--clean` averages a sign-flipped second pass, 2× slower, −36 dB difference). ~1× real time on 2 cores.
 - On the new SeeU demo "Alone": separated vocals were clean. Transcribing the vocal stem split lines properly and fixed many words ("아픔", "지나쳐 가는", "쇼윈도"), and singing start times became exact (0:06 instead of 0:00 on a 30 s clip). But whisper returned only "[끝]" for the first verse on the stem → describe now transcribes both and fills gaps from the mix ("원곡에서 받아씀").

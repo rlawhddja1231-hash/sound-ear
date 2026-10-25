@@ -21,15 +21,23 @@ L="${CLAUDE_SKILL_DIR:-}/scripts/listen.py"
 echo "$L"
 ```
 
-**Lyrics / speech (optional):** `pip install pywhispercpp` and a whisper.cpp model file `ggml-*.bin` from https://huggingface.co/ggerganov/whisper.cpp (recommended: `ggml-small-q5_1.bin`, 190 MB, MIT). Put it in `~/.cache/sound-ear/` or pass `--model`, or set `SOUND_EAR_MODEL`. If the sandbox cannot reach Hugging Face, ask the user to download the file and attach it. Without a model, `describe` still works but guesses where the singing is from loudness only.
+**Lyrics / speech (optional):** `pip install pywhispercpp` and a whisper.cpp model file `ggml-*.bin` from https://huggingface.co/ggerganov/whisper.cpp (`ggml-small-q5_1.bin`, 190 MB, fast; or `ggml-medium-q5_0.bin`, 539 MB, much better for Korean sung lyrics, ~1.6× real time on 2 cores — the largest model found is used unless `--fast`). Put it in `~/.cache/sound-ear/` or pass `--model`, or set `SOUND_EAR_MODEL`. If the sandbox cannot reach Hugging Face, ask the user to download the file and attach it. Without a model, `describe` still works but guesses where the singing is from loudness only.
 
 **Instruments, genre and mood (optional):** `pip install essentia-tensorflow` and these files from https://essentia.upf.edu/models/ (about 26 MB; **CC BY-NC-ND 4.0, non-commercial** — never bundle or redistribute them, the user downloads them): `feature-extractors/discogs-effnet/discogs-effnet-bs64-1.pb`, and from `classification-heads/`: `mtg_jamendo_instrument-discogs-effnet-1.pb/.json` (40 instruments), `genre_discogs400-discogs-effnet-1.pb/.json` (400 genres), `mtg_jamendo_moodtheme-discogs-effnet-1.pb/.json` (56 moods). Put them in `~/.cache/sound-ear/essentia/` or pass `--essentia DIR` / set `SOUND_EAR_ESSENTIA`. About 6 s for a 4-minute song.
 
 **Vocal separation (optional, recommended for full mixes):** `pip install onnxruntime` and the UVR MDX-Net model `Kim_Vocal_2.onnx` (67 MB) from the Ultimate Vocal Remover model repo: https://github.com/TRvlvr/model_repo/releases/download/all_public_uvr_models/Kim_Vocal_2.onnx → `~/.cache/sound-ear/` (or `--sep-model`, `SOUND_EAR_SEP_MODEL`). Not bundled; download it. Takes about as long as the song on 2 CPU cores.
 
-Self-test (optional, ~20 s): `python3 "$(dirname "$L")/../tests/selftest.py"` → should print `PASS` (7 planted problems found, none extra).
+Self-tests (optional): `python3 "$(dirname "$L")/../tests/selftest.py"` (~20 s; 7 planted problems found, none extra) and `python3 "$(dirname "$L")/../tests/mixtest.py"` (~10 s; synthetic song with drumless intro, verses and a repeated louder chorus — checks sections, drums and chorus matching). Both should print `PASS`.
 
-## 2. Workflow
+## 1b. Fastest path: one command
+
+```bash
+python3 "$L" full song.mp3 --lang ko --out song_full     # add --fast for the small lyrics model
+```
+
+`full` = separate (if the model exists) → check the mix → pitch-check the separated vocal (key taken from the backing) → describe → **`종합보고서.md`**: a one-page summary (mood, key, tempo, LUFS, genre/mood/instruments, vocal range, structure line) plus one table of everything to fix, most urgent first, with where it was found (mix or vocal). Read that first, then open the detailed reports it links. A 4.5-minute song takes ~10 min on 2 cores with the medium lyrics model, ~6 min with `--fast`. If the file is already vocal-only (separation finds almost no backing), it is checked as a vocal directly.
+
+## 2. Workflow (step by step)
 
 1. **Get the file.** Work on a copy; never edit the user's original.
 2. **Pick the mode.** For vocal-synth songs, ask for both files if available:
@@ -72,11 +80,12 @@ python3 "$L" check stems/보컬.wav --mode vocal        # key is taken from stem
 
 How it decides (so you can explain or overrule it):
 - **Sections**: novelty curve on beat-synchronous chroma + timbre + loudness; repeats are long diagonal stripes in a chroma recurrence matrix. Same letter = same melody/harmony.
-- **Chorus**: a repeated section whose repeats also share the *same lyrics* (same melody with different lyrics is a verse). Without lyrics it falls back to "repeated and clearly louder"; if neither holds it does not name a chorus.
+- **Chorus**: a repeated section that *returns after other parts* (back-to-back repeats count once) and whose repeats share lyrics — either overall or at least one matching line (a hook). Same melody with different lyrics is a verse. Without lyrics it falls back to "repeated and clearly louder"; if neither holds it does not name a chorus.
+- **Sections** also react to drums entering or leaving (percussive level is part of the novelty features), and short songs get at least 5 parts.
 - **Drums**: percussive part (HPSS) hitting regularly on the beat (autocorrelation ≥ 0.45). Vocal-only tracks score ~0.25.
 - **Mood**: the one-line guess comes from key (major/minor), tempo, loudness and brightness. With Essentia models, the music AI's genre, mood and instrument guesses (with confidence %) are added: above ~30 % is fairly sure, ~15 % is "maybe". Per-section instruments show what enters or leaves.
 - **Vocal-only files**: the instrument AI was trained on full mixes and hears drums in a cappella tracks; when the beat-regularity check finds no drums anywhere, drum-like labels are dropped, and when there is also no bass anywhere, instrument names are skipped.
-- **Lyrics**: whisper.cpp; lines that look made up during instrumentals (subtitle credits, repeated lines) are flagged. Sung lyrics have mistakes, especially over loud backing; vocal-only files are much better. About 25–40 s per minute of audio on 2 CPU cores with the small model.
+- **Lyrics**: whisper.cpp; lines that look made up during instrumentals (subtitle credits, "please subscribe", bracketed song titles, stretched syllables, repeated lines) are flagged or dropped. With separation, the vocal stem is transcribed and only gaps where the voice is audible but no words came out are re-transcribed from the mix ("원곡에서 받아씀"). Sung lyrics have mistakes, especially over loud backing; vocal-only files are much better. About 25–40 s per minute of audio on 2 CPU cores with the small model.
 
 ## 3. What each finding means and how to fix it
 
