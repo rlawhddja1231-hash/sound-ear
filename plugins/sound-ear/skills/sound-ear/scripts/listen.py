@@ -238,8 +238,10 @@ def check_silence(st, sr, probs, stats, mode):
 
     # 뚝 끊김: 10ms 안에 -25dB 이상에서 -60dB 아래로
     cut_times = []
+    # 기준은 곡 크기에 맞춤: 조용히 만든 곡(-19 LUFS쯤)도 잡히게 [확인: 10-25 예시곡 0.25초 구멍을 -25dB 고정 기준으로 놓침]
+    thr = min(-25.0, float(np.median(lv[loud])) - 8)
     for i in range(len(lv) - 2):
-        if lv[i] > -25 and min(lv[i + 1], lv[i + 2]) < -60:
+        if lv[i] > thr and min(lv[i + 1], lv[i + 2]) < -60:
             cut_times.append((i + 1) * 0.01)
     for a, b, n in group_times(cut_times, 0.3)[:20]:
         probs.append(dict(t=a, end=None, kind="뚝 끊김", level=LEVEL_CHECK,
@@ -477,6 +479,14 @@ def check_pitch(y, sr, probs, stats, scale):
                 # 튄 높이에 실제 바탕음 소리가 있어야 함(없으면 음 바뀜 사이의 잡소리를 잘못 읽은 것)
                 if ref > 0 and peak(a + k, hz_new) < 0.3 * ref:
                     continue
+                # 노트가 끝나거나 시작하는 곳(앞뒤 20ms 세기가 2배 넘게 다름)은 이음새의 자연스러운 흔들림
+                # [확인: 10-25 「구마」 한국어 커버 1:40.9 — 큰 노트가 끝나는 순간 화음 목소리가 드러나며 튐으로 보임]
+                kk = a + ga
+                n20 = max(1, int(0.02 * sr / h2))
+                rb_ = float(np.mean(r2[max(0, kk - n20):kk])) if kk > 0 else 0.0
+                ra_ = float(np.mean(r2[kk + 1:kk + 1 + n20])) if kk + 1 < len(r2) else 0.0
+                if min(rb_, ra_) > 0 and max(rb_, ra_) / min(rb_, ra_) > 2.0:
+                    continue
                 glitch_t.append((t2[a + ga], octave))
     # 1초 안에 흔들림 후보가 4개 넘게 몰린 곳은 화음(두 목소리 이상)·잡음이라 음높이를 믿을 수 없다
     # [확인: 10-24 테토 보컬의 화음 구간에서 두 줄 사이를 오가며 튐으로 헛짚음]
@@ -551,7 +561,7 @@ def check_pitch(y, sr, probs, stats, scale):
     return dict(t=t, midi=midi, notes=notes, vflag=vflag, t2=t2, m2=m2v)
 
 
-def check_sibilance_breath(y, sr, probs, stats, pitch):
+def check_sibilance_breath(y, sr, probs, stats, pitch, backing=None):
     import librosa
 
     S = np.abs(librosa.stft(y, n_fft=1024, hop_length=256)) ** 2
@@ -570,8 +580,30 @@ def check_sibilance_breath(y, sr, probs, stats, pitch):
     for a, b in runs(m):
         if (b - a) * 256 / sr >= 0.03:
             ev.append(t[a])
+    # 분리한 목소리라면: 같은 순간 반주에도 쇳소리(하이햇·심벌)가 있으면 반주에서 샌 소리로 보고 뺀다
+    # [확인: 10-25 「구마」 원곡 분리 목소리에서 쇳소리 62곳 — 대부분 하이햇이 샌 것]
+    leak = 0
+    if backing is not None:
+        import librosa as _lb
+        by_, _ = _lb.load(backing, sr=sr, mono=True)
+        Sb = np.abs(_lb.stft(by_, n_fft=1024, hop_length=256)) ** 2
+        hb = 10 * np.log10(Sb[(freqs >= 5000) & (freqs <= 10000)].sum(axis=0) + 1e-12)
+        on = _lb.onset.onset_detect(onset_envelope=np.maximum(0, np.diff(hb, prepend=hb[0])), sr=sr, hop_length=256, units="time")
+        if len(on):
+            keep = [e for e in ev if np.min(np.abs(on - e)) > 0.04]
+            leak = len(ev) - len(keep)
+            ev = keep
     groups = group_times(ev, 0.2)
-    stats["센 ㅅ·ㅊ 소리"] = len(groups)
+    if leak:
+        stats["반주에서 샌 쇳소리(뺌)"] = leak
+    stats.setdefault("센 ㅅ·ㅊ 소리", len(groups))
+    if len(groups) > 8:
+        # 많으면 하나하나보다 '전체적으로 셈'이 맞는 진단 — 디에서 하나로 고칠 일
+        ex = ", ".join(fmt_t(g[0]) for g in groups[:6])
+        probs.append(dict(t=groups[0][0], end=groups[-1][0], kind="ㅅ·ㅊ 소리 셈(곡 전체)", level=LEVEL_CHECK,
+                          msg=f"쇳소리가 모음만큼 센 곳이 {len(groups)}곳으로 곡 전체에 퍼져 있습니다(예: {ex} …). "
+                              "노트마다 고치기보다 보컬 트랙에 디에서(De-esser)를 한 번 거는 게 좋습니다."))
+        groups = []
     for a, b, n in groups[:20]:
         probs.append(dict(t=a, end=None, kind="ㅅ·ㅊ 소리 셈", level=LEVEL_CHECK,
                           msg="'스·츠' 같은 쇳소리가 모음만큼 큽니다. 디에서(De-esser)를 걸거나 그 노트의 자음 크기를 줄이세요."))
@@ -720,7 +752,7 @@ def cmd_check(args):
     pitch = None
     if mode == "vocal":
         pitch = check_pitch(y, ysr, probs, stats, scale)
-        check_sibilance_breath(y, ysr, probs, stats, pitch)
+        check_sibilance_breath(y, ysr, probs, stats, pitch, backing=key_src if key_src and os.path.basename(key_src) == "반주.wav" else None)
     stats.pop("_scale", None)
 
     order = {LEVEL_MUST: 0, LEVEL_CHECK: 1, LEVEL_INFO: 2}
@@ -890,8 +922,10 @@ def transcribe(path, model_path, lang="auto", threads=None, prompt=None):
     r = subprocess.run(["ffmpeg", "-v", "error", "-i", path, "-vn", "-f", "f32le", "-ac", "1", "-ar", "16000", "-"],
                        capture_output=True)
     y = np.frombuffer(r.stdout, np.float32)
+    # suppress_nst(말이 아닌 표시 막기)+no_context(앞 줄에 끌려가지 않기): 노래에서 "(♪~♪)", "[블랙핑크 - …]"만 내던 것을 막음
+    # [확인: 10-25 medium으로 일본어 「구마」 앞 45초가 '(♪~♪)' 두 줄 → 이 설정으로 가사 7줄, 「Alone」 후렴도 더 정확]
     params = dict(language=lang if lang != "auto" else "", print_progress=False, print_realtime=False,
-                  n_threads=threads or max(1, os.cpu_count() or 1), suppress_blank=True, no_context=False)
+                  n_threads=threads or max(1, os.cpu_count() or 1), suppress_blank=True, no_context=True, suppress_nst=True)
     if prompt:
         params["initial_prompt"] = prompt
     m = Model(model_path, redirect_whispercpp_logs_to=None, **params)
@@ -908,7 +942,7 @@ def transcribe(path, model_path, lang="auto", threads=None, prompt=None):
 def clean_segments(segs):
     """whisper가 음악에서 자주 지어내는 것(같은 줄 반복, 자막 인사, 음표만)을 걸러 표시한다."""
     import re
-    junk = re.compile(r"(구독|좋아요|시청해 주셔서|시청해주셔서|자막|MBC|KBS|SBS|thank you for watching|subscribe|ご視聴|字幕|노래가 정말 잘 어울려|한국어 노래)", re.I)
+    junk = re.compile(r"(구독|좋아요|시청해 주셔서|시청해주셔서|자막|MBC|KBS|SBS|thank you for watching|subscribe|ご視聴|字幕|노래가 정말 잘 어울려|한국어 노래|제가 제일 좋아하는|이 노래는|^감사합니다\.?$|^\[?음악\]?$|【音楽】)", re.I)
     res = []
     prev = None
     rep = 0
@@ -1637,7 +1671,9 @@ def cmd_full(args):
     stems = os.path.join(out, "분리")
     vocal = inst = None
     vocal_only = False
-    sep_model = find_sep_model(args.sep_model)
+    sep_model = find_sep_model(args.sep_model) if args.deep else None
+    if args.deep and not sep_model:
+        print("※ 보컬 분리 모델이 없어 목소리 검사는 건너뜁니다. `setup`으로 준비하세요.")
     if sep_model and not args.no_separate:
         step("목소리와 반주 가르기")
         vp, ip = os.path.join(stems, "보컬.wav"), os.path.join(stems, "반주.wav")
@@ -1652,7 +1688,7 @@ def cmd_full(args):
         vocal_only = rb > 0 and 20 * np.log10((ra + 1e-9) / rb) < -18
     # 2) 완성곡 흠 찾기
     step("흠 찾기 (원곡)")
-    mode1 = "vocal" if vocal_only else args.mode
+    mode1 = "vocal" if vocal_only else detect_mode(path, args.mode)
     cmd_check(Namespace(file=path, mode=mode1, out=os.path.join(out, "1_원곡검사"), max_zoom=8, key_from=None))
     # 3) 목소리 음정 검사
     if vocal and not vocal_only:
@@ -1660,7 +1696,9 @@ def cmd_full(args):
         cmd_check(Namespace(file=vocal, mode="vocal", out=os.path.join(out, "2_목소리검사"), max_zoom=8, key_from=inst))
     # 4) 곡 설명
     step("곡 설명 (구성·가사·악기·분위기)")
-    cmd_describe(Namespace(file=path, model=args.model, lang=args.lang, words=None, no_words=args.no_words, out=os.path.join(out, "3_곡설명"),
+    wj = os.path.join(out, "3_곡설명", "words.json")
+    reuse = wj if os.path.isfile(wj) and os.path.getmtime(wj) >= os.path.getmtime(path) and not args.redo_words else None
+    cmd_describe(Namespace(file=path, model=args.model, lang=args.lang, words=reuse, no_words=args.no_words, out=os.path.join(out, "3_곡설명"),
                            essentia=None, no_ai=args.no_ai, no_separate=True, sep_model=None, vocal=vocal))
     # 5) 종합 보고서
     def rj(p):
@@ -1673,8 +1711,9 @@ def cmd_full(args):
     d = rj(os.path.join(out, "3_곡설명", "describe.json")) or {}
     st1 = c1.get("stats", {})
     st2 = c2.get("stats", {})
-    L = [f"# 종합 보고서 — {os.path.basename(path)}", ""]
-    L.append(f"- 걸린 시간: {time.time() - t0:.0f}초" + (" / 목소리만 있는 파일로 보고 분리 없이 검사함" if vocal_only else ""))
+    L = [f"# 종합 보고서 — {os.path.basename(path)}", "", "VERDICT", ""]
+    L.append(f"- 걸린 시간: {time.time() - t0:.0f}초 / " + ("자세히 듣기(--deep)" if args.deep else "빠른 검사 — 목소리만 갈라 음정까지 보려면 `--deep`")
+             + (" / 목소리만 있는 파일로 보고 분리 없이 검사함" if vocal_only else ""))
     L += ["", "## 한눈에", ""]
     L.append(f"- **느낌**: {d.get('mood', '-')}")
     L.append(f"- **길이** {st1.get('길이', '-')} / **조** {d.get('key') or st1.get('조(키, 추정)', '-')} / **빠르기** 약 {d.get('tempo', 0):.0f} BPM / **크기** {st1.get('라우드니스(LUFS)', '-')} LUFS")
@@ -1701,12 +1740,25 @@ def cmd_full(args):
         for p in c.get("problems", []):
             if src == "목소리" and p["kind"] in ("앞 무음 김", "끝이 잘림", "시작이 잘림", "트루 피크 넘침", "너무 큼", "너무 작음", "소리가 0dB까지 꽉 참", "클리핑(소리 깨짐)"):
                 continue  # 분리한 목소리의 크기·앞뒤는 원곡에서 본다
+            if src == "목소리" and p["kind"] in ("딸깍·틱 소리", "노트 끝 틱", "틱이 몰린 구간") and p["level"] == LEVEL_MUST:
+                # 분리한 목소리의 틱은 분리하다 남은 소리일 때가 많다 [확인: 10-25 구마 커버 1:30.3 — 그림에 아무것도 안 보임]
+                p = dict(p, level=LEVEL_CHECK, msg=p["msg"] + " (분리한 목소리에서만 보임 — 분리하다 남은 소리일 수 있으니 원곡에서 들어 보세요)")
             items.append(dict(src=src, **p))
     order = {LEVEL_MUST: 0, LEVEL_CHECK: 1, LEVEL_INFO: 2}
     items.sort(key=lambda p: (order.get(p["level"], 3), p.get("t", 0)))
     n_must = sum(1 for p in items if p["level"] == LEVEL_MUST)
     n_chk = sum(1 for p in items if p["level"] == LEVEL_CHECK)
     L += ["", f"## 고칠 것 — 꼭 {n_must}곳 / 들어 보고 판단 {n_chk}곳", ""]
+    if n_must == 0 and n_chk == 0:
+        verdict = "크게 고칠 곳 없음 👍"
+    elif n_must == 0:
+        verdict = f"꼭 고칠 곳은 없음 👍 — 들어 보고 판단할 곳 {n_chk}곳만 귀로 확인해 보세요"
+    elif n_must <= 3:
+        verdict = f"꼭 고칠 곳 {n_must}곳 🔧 — 아래 표 맨 위부터 고치면 됩니다"
+    else:
+        verdict = f"고칠 곳이 많음 ⚠️ (꼭 {n_must}곳) — 아래 표 맨 위부터 하나씩 보세요"
+    L[L.index("VERDICT")] = f"> **한마디: {verdict}**" + (
+        "\n>\n> 🟠 '들어 보고 판단'은 잘 만든 곡에서도 흔히 나옵니다(일부러 넣은 효과·악기 소리일 때가 많음). 귀로 듣고 괜찮으면 넘어가세요." if n_chk else "")
     if not [p for p in items if p["level"] != LEVEL_INFO]:
         L.append("- 크게 고칠 곳이 없습니다 🎉")
     L += ["| 급함 | 시각 | 어디서 | 무엇 | 설명 |", "|---|---|---|---|---|"]
@@ -1729,6 +1781,183 @@ def cmd_full(args):
     open(rp, "w", encoding="utf-8").write("\n".join(L))
     print(f"\n[완료] {rp} ({time.time() - t0:.0f}초)")
     print("\n".join(L[:14]))
+
+
+# ---------------------------------------------------------------- 준비 한 번에
+MODEL_DIR = os.path.expanduser("~/.cache/sound-ear")
+ESS_BASE = "https://essentia.upf.edu/models/"
+ESS_FILES = ["feature-extractors/discogs-effnet/discogs-effnet-bs64-1.pb"] + [
+    f"classification-heads/{h}/{h}-discogs-effnet-1.{ext}"
+    for h in ("mtg_jamendo_instrument", "genre_discogs400", "mtg_jamendo_moodtheme") for ext in ("pb", "json")]
+WHISPER_URL = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/{}"
+PKGS = [("librosa", "librosa"), ("soundfile", "soundfile"), ("pyloudnorm", "pyloudnorm"), ("matplotlib", "matplotlib"),
+        ("koreanize_matplotlib", "koreanize-matplotlib"), ("scipy", "scipy"), ("pywhispercpp", "pywhispercpp"),
+        ("onnxruntime", "onnxruntime"), ("essentia", "essentia-tensorflow")]
+
+
+def _pip(name):
+    for extra in ([], ["--break-system-packages"]):
+        r = subprocess.run([sys.executable, "-m", "pip", "install", "-q", *extra, name], capture_output=True, text=True)
+        if r.returncode == 0:
+            return True
+    return False
+
+
+def _download(url, dest, timeout=600):
+    import urllib.request
+    tmp = dest + ".part"
+    try:
+        with urllib.request.urlopen(url, timeout=30) as r, open(tmp, "wb") as f:
+            while True:
+                b = r.read(1 << 20)
+                if not b:
+                    break
+                f.write(b)
+        os.replace(tmp, dest)
+        return True
+    except Exception:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+        return False
+
+
+def _sha(p):
+    import hashlib
+    h = hashlib.sha256()
+    with open(p, "rb") as f:
+        for b in iter(lambda: f.read(1 << 20), b""):
+            h.update(b)
+    return h.hexdigest()
+
+
+def _collect_uploads(search_dirs):
+    """사용자가 올리거나 가져온 모델 파일을 찾아 제자리에 둔다: ggml-*.bin, part1/part2, essentia tar, Kim_Vocal_2.onnx"""
+    import glob
+    import tarfile
+    found = []
+    os.makedirs(os.path.join(MODEL_DIR, "essentia"), exist_ok=True)
+    for d in search_dirs:
+        if not d or not os.path.isdir(d):
+            continue
+        deep = d != os.getcwd()  # 지금 폴더는 바로 안만 본다(홈 전체를 뒤지지 않게)
+        for p in glob.glob(os.path.join(d, "**", "*") if deep else os.path.join(d, "*"), recursive=deep):
+            b = os.path.basename(p)
+            if not os.path.isfile(p):
+                continue
+            if b.startswith("ggml-") and b.endswith(".bin"):
+                dst = os.path.join(MODEL_DIR, b)
+                if not os.path.exists(dst) or os.path.getsize(dst) != os.path.getsize(p):
+                    subprocess.run(["cp", p, dst])
+                    found.append(b)
+            elif b.endswith(".bin.part1"):
+                p2 = p[:-1] + "2"
+                name = b[:-len(".part1")]
+                dst = os.path.join(MODEL_DIR, name)
+                if os.path.exists(p2) and not os.path.exists(dst):
+                    with open(dst, "wb") as out:
+                        for q in (p, p2):
+                            with open(q, "rb") as f:
+                                for chunk in iter(lambda: f.read(1 << 20), b""):
+                                    out.write(chunk)
+                    found.append(name + " (두 조각을 합침)")
+            elif b == "Kim_Vocal_2.onnx":
+                dst = os.path.join(MODEL_DIR, b)
+                if not os.path.exists(dst):
+                    subprocess.run(["cp", p, dst])
+                    found.append(b)
+            elif b.endswith(".tar") and "essentia" in b.lower():
+                if all(os.path.exists(os.path.join(MODEL_DIR, "essentia", os.path.basename(f))) for f in ESS_FILES):
+                    continue
+                try:
+                    with tarfile.open(p) as t:
+                        for m in t.getmembers():
+                            if m.isfile() and "/" not in m.name and ".." not in m.name:
+                                t.extract(m, os.path.join(MODEL_DIR, "essentia"))
+                    found.append(b + " (풀어 둠)")
+                except Exception:
+                    pass
+            elif "discogs-effnet" in b and b.endswith((".pb", ".json")):
+                dst = os.path.join(MODEL_DIR, "essentia", b)
+                if not os.path.exists(dst):
+                    subprocess.run(["cp", p, dst])
+                    found.append(b)
+    return found
+
+
+def cmd_setup(args):
+    """필요한 것을 확인하고 깔 수 있는 건 깔고, 못 받는 건 받는 법을 알려 준다."""
+    rows = []
+    os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
+
+    def row(name, ok, note=""):
+        rows.append((name, ok, note))
+        print(f"  {'✅' if ok else '❌'} {name}" + (f" — {note}" if note else ""))
+    print("1) 프로그램")
+    import shutil
+    row("ffmpeg", bool(shutil.which("ffmpeg") and shutil.which("ffprobe")), "" if shutil.which("ffmpeg") else "apt/brew로 ffmpeg를 깔아야 합니다")
+    import importlib
+    for mod, pipname in PKGS:
+        try:
+            importlib.import_module(mod)
+            ok = True
+        except Exception:
+            ok = _pip(pipname) if not args.check else False
+        row(pipname, ok, "" if ok else "pip로 못 깔았습니다")
+    print("2) 올려 둔 모델 파일 찾기")
+    dirs = [os.getcwd(), "/mnt/user-data/uploads", os.path.expanduser("~/Downloads")] + (args.from_dir or [])
+    got = _collect_uploads(dirs)
+    for g in got:
+        print("   가져옴:", g)
+    print("3) 모델")
+    os.makedirs(MODEL_DIR, exist_ok=True)
+    need = []
+    # 받아쓰기
+    small = os.path.join(MODEL_DIR, "ggml-small-q5_1.bin")
+    med = os.path.join(MODEL_DIR, "ggml-medium-q5_0.bin")
+    if not (os.path.exists(small) or os.path.exists(med)) and not args.check:
+        _download(WHISPER_URL.format("ggml-small-q5_1.bin"), small)
+    if args.accurate and not os.path.exists(med) and not args.check:
+        _download(WHISPER_URL.format("ggml-medium-q5_0.bin"), med)
+    for p_, mn in ((med, 500e6), (small, 150e6)):
+        if os.path.exists(p_) and os.path.getsize(p_) < mn:
+            os.remove(p_)
+            print(f"   {os.path.basename(p_)} 이 덜 받아져(크기가 작음) 지웠습니다")
+    has_w = os.path.exists(small) or os.path.exists(med)
+    row("가사 받아쓰기 (whisper)", has_w, ("큰 모델" if os.path.exists(med) else "작은 모델") if has_w else "")
+    if not has_w:
+        need.append(("ggml-small-q5_1.bin (190MB) — 가사 받아쓰기", WHISPER_URL.format("ggml-small-q5_1.bin")))
+    if args.accurate and not os.path.exists(med):
+        need.append(("ggml-medium-q5_0.bin (539MB) — 한국어 가사가 훨씬 정확", WHISPER_URL.format("ggml-medium-q5_0.bin")))
+    # 보컬 분리
+    sep = os.path.join(MODEL_DIR, "Kim_Vocal_2.onnx")
+    if not os.path.exists(sep) and not args.check:
+        _download(SEP_URL, sep)
+    row("보컬 분리 (UVR)", os.path.exists(sep))
+    if not os.path.exists(sep):
+        need.append(("Kim_Vocal_2.onnx (67MB) — 보컬 분리", SEP_URL))
+    # 음악 AI
+    ed = os.path.join(MODEL_DIR, "essentia")
+    os.makedirs(ed, exist_ok=True)
+    miss = [f for f in ESS_FILES if not os.path.exists(os.path.join(ed, os.path.basename(f)))]
+    if miss and not args.check:
+        for f in miss:
+            _download(ESS_BASE + f, os.path.join(ed, os.path.basename(f)))
+        miss = [f for f in ESS_FILES if not os.path.exists(os.path.join(ed, os.path.basename(f)))]
+    row("악기·장르·분위기 AI (Essentia, 비상업용)", not miss)
+    for f in miss:
+        need.append((os.path.basename(f) + " — 악기·장르·분위기", ESS_BASE + f))
+    print()
+    if need:
+        print("❗ 아래 파일은 이 환경에서 직접 받지 못했습니다(인터넷이 막혀 있을 수 있음).")
+        print("   브라우저로 받아서 채팅에 올리거나 폴더에 두고 `setup`을 다시 돌리면 알아서 제자리에 둡니다.")
+        print("   (400MB가 넘는 파일을 못 올리면 반씩 .part1/.part2로 나눠 올려도 합쳐 줍니다)")
+        for name, url in need:
+            print(f"   - {name}\n     {url}")
+    else:
+        print("🎉 전부 준비됐습니다. `full 노래파일`로 시작하세요.")
+    json.dump(dict(rows=rows, missing=need), open(os.path.join(MODEL_DIR, "setup_status.json"), "w", encoding="utf-8"),
+              ensure_ascii=False, indent=1)
+    return 0 if not need else 1
 
 
 def main():
@@ -1778,9 +2007,10 @@ def main():
     sp.set_defaults(fn=cmd_separate)
     d.add_argument("--out")
     d.set_defaults(fn=cmd_describe)
-    fu = sub.add_parser("full", help="한 번에 다 듣기: 분리 → 흠 찾기 → 음정 → 곡 설명 → 종합보고서.md")
+    fu = sub.add_parser("full", help="한 번에 듣기: 흠 찾기 → 곡 설명 → 종합보고서.md (기본 빠른 검사, --deep은 보컬 분리·큰 모델·목소리 음정)")
     fu.add_argument("file")
-    fu.add_argument("--mode", default="mix", choices=["auto", "vocal", "mix"])
+    fu.add_argument("--deep", action="store_true", help="자세히: 보컬 분리 + 큰 받아쓰기 모델 + 목소리 음정 검사 (몇 배 느림)")
+    fu.add_argument("--mode", default="auto", choices=["auto", "vocal", "mix"], help="보컬만 있는 파일이면 vocal (이름에 vocal·보컬이 있으면 자동)")
     fu.add_argument("--lang", default="auto")
     fu.add_argument("--fast", action="store_true", help="받아쓰기를 작은 모델로 빠르게")
     fu.add_argument("--model")
@@ -1789,17 +2019,23 @@ def main():
     fu.add_argument("--no-words", action="store_true")
     fu.add_argument("--no-ai", action="store_true")
     fu.add_argument("--all", action="store_true", help="참고 항목까지 종합 보고서에 넣기")
+    fu.add_argument("--redo-words", action="store_true", help="이미 받아쓴 가사가 있어도 다시 받아쓰기")
     fu.add_argument("--out")
     fu.set_defaults(fn=cmd_full)
+    se = sub.add_parser("setup", help="필요한 프로그램·모델을 한 번에 확인하고 준비")
+    se.add_argument("--check", action="store_true", help="설치·다운로드 없이 상태만 보기")
+    se.add_argument("--accurate", action="store_true", help="한국어 가사가 더 정확한 큰 받아쓰기 모델(539MB)도 받기")
+    se.add_argument("--from", dest="from_dir", action="append", help="모델 파일을 둔 폴더(여러 번 가능)")
+    se.set_defaults(fn=cmd_setup)
     m = sub.add_parser("compare")
     m.add_argument("a")
     m.add_argument("b")
     m.add_argument("--out")
     m.set_defaults(fn=cmd_compare)
     args = ap.parse_args()
-    if getattr(args, "fast", False):
+    if getattr(args, "fast", False) or (args.cmd == "full" and not args.deep):
         os.environ["SOUND_EAR_FAST"] = "1"
-    args.fn(args)
+    sys.exit(args.fn(args) or 0)
 
 
 if __name__ == "__main__":

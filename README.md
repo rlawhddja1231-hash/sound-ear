@@ -43,18 +43,24 @@ Claude는 귀가 없습니다. **sound-ear**는 노래·보컬·효과음·영�
 
 ## 쓰는 법
 
-소리 파일을 채팅에 올리고 이렇게 말하면 됩니다. Claude는 `full` 명령 하나로 흠 찾기·목소리 분리·음정·가사·곡 설명을 다 하고 **종합보고서**를 줍니다.
+**처음 한 번:** "sound-ear 준비해 줘"라고 하면 Claude가 `setup`으로 필요한 프로그램과 모델을 한 번에 확인·설치합니다. 인터넷이 막혀 못 받은 모델은 받는 주소를 알려 주니, 받아서 채팅에 올리고 다시 "준비해 줘" 하면 알아서 제자리에 둡니다.
+
+그다음엔 소리 파일을 채팅에 올리고 이렇게 말하면 됩니다. Claude는 `full` 명령 하나로 **빠른 검사(4분 곡이면 2~3분)** 를 하고 **종합보고서** 맨 위에 한마디 평가를 줍니다. "자세히 들어 줘"라고 하면 `--deep`으로 목소리를 갈라 음정까지 봅니다(몇 배 느림).
 
 - "이 노래 들어 보고 이상한 데 찾아 줘"
 - "보컬만 뽑은 거야. 음정이랑 음 튀는 데 봐 줘"
 - "고친 판이야. 전이랑 비교해 줘"
 - "이 노래 어떤 노래인지 설명해 줘" / "가사 받아 적어 줘"
 
-**가사 받아쓰기 준비(한 번만):** [whisper.cpp 모델](https://huggingface.co/ggerganov/whisper.cpp)에서 `ggml-small-q5_1.bin`(190MB, 빠름) 또는 한국어 가사가 훨씬 정확한 `ggml-medium-q5_0.bin`(539MB)을 받아 Claude에게 주세요. 없어도 다른 기능은 다 됩니다.
+**예시 보고서:** [docs/example-report/종합보고서.md](docs/example-report/종합보고서.md) — 일부러 딸깍 소리와 뚝 끊김을 넣은 40초짜리 합성곡([예시곡.mp3](docs/example-report/예시곡.mp3))을 빠른 검사로 돌린 결과입니다(16초 걸림, 둘 다 찾음).
 
-**보컬 분리 준비(한 번만):** [Kim_Vocal_2.onnx](https://github.com/TRvlvr/model_repo/releases/download/all_public_uvr_models/Kim_Vocal_2.onnx)(67MB)를 받아 Claude에게 주세요.
+모델을 손으로 받고 싶을 때:
 
-**악기·장르·분위기 준비(한 번만):** [Essentia 모델](https://essentia.upf.edu/models/)에서 파일 7개(약 26MB, 목록은 SKILL.md)를 받아 Claude에게 주세요. 이 모델은 **비상업용만 무료(CC BY-NC-ND)**라 이 저장소에는 넣지 않았습니다.
+**가사 받아쓰기 모델:** [whisper.cpp 모델](https://huggingface.co/ggerganov/whisper.cpp)에서 `ggml-small-q5_1.bin`(190MB, 빠름) 또는 한국어 가사가 훨씬 정확한 `ggml-medium-q5_0.bin`(539MB)을 받아 Claude에게 주세요. 없어도 다른 기능은 다 됩니다.
+
+**보컬 분리 모델:** [Kim_Vocal_2.onnx](https://github.com/TRvlvr/model_repo/releases/download/all_public_uvr_models/Kim_Vocal_2.onnx)(67MB)를 받아 Claude에게 주세요.
+
+**악기·장르·분위기 모델:** [Essentia 모델](https://essentia.upf.edu/models/)에서 파일 7개(약 26MB, 목록은 SKILL.md)를 받아 Claude에게 주세요. 이 모델은 **비상업용만 무료(CC BY-NC-ND)**라 이 저장소에는 넣지 않았습니다.
 
 **팁:** 보컬 합성 노래는 **보컬만 따로 내보낸 wav + 완성곡 wav**를 같이 주면 가장 정확합니다. 반주가 섞이면 음정 검사가 틀립니다.
 
@@ -101,7 +107,11 @@ For each finding it makes a close-up picture and a short audio snippet, and it c
 ```
 **Install (claude.ai):** download `sound-ear.zip` from Releases and upload it under Customize → Skills → Upload skill (code execution must be enabled).
 
-**Usage:** attach an audio file and ask "listen to this and find problems". Claude runs `full` (separation → checks → description) and gives you a one-page summary report. For best pitch results, give a vocal-only export plus the full mix.
+**Setup:** say "set up sound-ear" once. Claude runs `setup`, which installs packages and fetches the models it can reach; for any it cannot download it prints the URL, and you can attach the file and run setup again (split .part1/.part2 files are joined automatically).
+
+**Usage:** attach an audio file and ask "listen to this and find problems". Claude runs `full` — a quick check by default (2–3 minutes for a 4-minute song) — and gives you a one-page report that starts with a one-line verdict. Ask for a detailed listen to run `--deep` (vocal separation, larger lyrics model, vocal pitch check). For best pitch results, give a vocal-only export plus the full mix.
+
+**Example report:** [docs/example-report/종합보고서.md](docs/example-report/종합보고서.md) — a 40-second synthetic song with a planted click and dropout; both found in 16 seconds.
 
 **Limits:** files only (no live mic), no taste judgements; clipping on lossy files (mp3, opus) is advisory only.
 

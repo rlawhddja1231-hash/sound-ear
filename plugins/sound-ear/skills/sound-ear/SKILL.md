@@ -13,13 +13,14 @@ What it cannot do: listen live through a microphone or judge taste. Lyrics need 
 ## 1. Setup (once per session)
 
 ```bash
-pip install -q librosa soundfile pyloudnorm matplotlib koreanize-matplotlib scipy 2>/dev/null \
-  || pip install -q --break-system-packages librosa soundfile pyloudnorm matplotlib koreanize-matplotlib scipy
-which ffmpeg ffprobe   # required; install ffmpeg if missing
 L="${CLAUDE_SKILL_DIR:-}/scripts/listen.py"
 [ -f "$L" ] || L=$(find / -name listen.py -path '*sound-ear*' 2>/dev/null | head -1)
-echo "$L"
+pip install -q librosa soundfile pyloudnorm matplotlib koreanize-matplotlib scipy 2>/dev/null \
+  || pip install -q --break-system-packages librosa soundfile pyloudnorm matplotlib koreanize-matplotlib scipy
+python3 "$L" setup          # checks/installs everything, fetches reachable models; --check = status only
 ```
+
+`setup` installs the optional packages, gathers model files the user attached (from the working folder, `/mnt/user-data/uploads`, `~/Downloads`, or `--from DIR`; `X.bin.part1`+`.part2` are joined, an `essentia*.tar` is unpacked), downloads what it can reach, and prints a ✅/❌ table plus the URL of every model it could not fetch. If something is missing, show the user that list in plain words and ask them to attach the file, then run `setup` again. Add `--accurate` to also fetch the 539 MB medium lyrics model. ffmpeg must already be installed. Manual details follow.
 
 **Lyrics / speech (optional):** `pip install pywhispercpp` and a whisper.cpp model file `ggml-*.bin` from https://huggingface.co/ggerganov/whisper.cpp (`ggml-small-q5_1.bin`, 190 MB, fast; or `ggml-medium-q5_0.bin`, 539 MB, much better for Korean sung lyrics, ~1.6× real time on 2 cores — the largest model found is used unless `--fast`). Put it in `~/.cache/sound-ear/` or pass `--model`, or set `SOUND_EAR_MODEL`. If the sandbox cannot reach Hugging Face, ask the user to download the file and attach it. Without a model, `describe` still works but guesses where the singing is from loudness only.
 
@@ -32,10 +33,11 @@ Self-tests (optional): `python3 "$(dirname "$L")/../tests/selftest.py"` (~20 s; 
 ## 1b. Fastest path: one command
 
 ```bash
-python3 "$L" full song.mp3 --lang ko --out song_full     # add --fast for the small lyrics model
+python3 "$L" full song.mp3 --lang ko --out song_full          # quick (default): ~2–3 min for a 4-min song
+python3 "$L" full song.mp3 --lang ko --out song_full --deep   # detailed: separation + medium model + vocal pitch
 ```
 
-`full` = separate (if the model exists) → check the mix → pitch-check the separated vocal (key taken from the backing) → describe → **`종합보고서.md`**: a one-page summary (mood, key, tempo, LUFS, genre/mood/instruments, vocal range, structure line) plus one table of everything to fix, most urgent first, with where it was found (mix or vocal). Read that first, then open the detailed reports it links. A 4.5-minute song takes ~10 min on 2 cores with the medium lyrics model, ~6 min with `--fast`. If the file is already vocal-only (separation finds almost no backing), it is checked as a vocal directly.
+Default `full` is **quick**: check the mix → describe with the small lyrics model, no separation. Use it unless the user asks for a detailed listen, lyrics accuracy or vocal pitch on a full mix; then run `--deep` (= separate → check the mix → pitch-check the separated vocal, key taken from the backing → describe with the largest model). **Report the result to the user as soon as it is ready; do not start extra runs they did not ask for.** Both write **`종합보고서.md`**, whose first line is a one-sentence verdict (e.g. "꼭 고칠 곳은 없음 👍 — 들어 보고 판단할 곳 3곳만…"); lead with it. 🟠 "들어 보고 판단" items show up even in professional songs (intentional effects, hi-hats), so say that rather than alarming the user. The report has a one-page summary (mood, key, tempo, LUFS, genre/mood/instruments, vocal range, structure line) plus one table of everything to fix, most urgent first, with where it was found (mix or vocal). Read that first, then open the detailed reports it links. `--deep` on a 4.5-minute song takes ~10 min on 2 cores (~6 min with `--fast`). Example output: `docs/example-report/` in the GitHub repo. For a vocal-only file add `--mode vocal` (automatic when the name contains vocal/보컬) so the quick run includes the pitch check; with `--deep`, a file with almost no backing is detected and checked as a vocal directly.
 
 ## 2. Workflow (step by step)
 

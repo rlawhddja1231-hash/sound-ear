@@ -2,6 +2,14 @@
 
 Newest first. Record date, file type, what was found, false positives, misses, and threshold changes.
 
+## 2026-10-25 — setup command, quick mode by default, one-line verdict — v1.6.0
+- `setup`: installs packages, gathers attached model files (joins .part1/.part2, unpacks an essentia tar), downloads what it can reach, prints ✅/❌ and URLs for the rest. Tested on an empty home: Kim_Vocal_2.onnx downloaded from GitHub; the rest came from attached files.
+- `full` is now quick by default (no separation, small lyrics model); `--deep` is the old behaviour. Users found the 10-minute run too slow for a first look.
+- `종합보고서.md` starts with a one-line verdict and says that 🟠 items are common even in professional songs.
+- Abrupt-cut threshold now follows the song's level (median − 8 dB, at most −25 dB): a 0.25 s dropout in a −19 LUFS synthetic song was missed with the fixed −25 dB rule.
+- Also in this version (found on a cover of 구마): pitch-glitch skip at note boundaries; clicks found only in the separated vocal become 🟠 (separation leftovers); `full` reuses words.json (`--redo-words`); `describe --vocal`; whisper `suppress_nst` + `no_context` (medium stopped printing "(♪~♪)"); more junk-line filters; sibilance flags that coincide with backing hi-hats are dropped and >8 groups become one summary line.
+- Example report in `docs/example-report/` (synthetic song, planted click and dropout, both found).
+
 ## 2026-10-25 — one-command full report, medium lyrics model, better chorus — v1.5.0
 - `full` command and `종합보고서.md`. On "Alone" (4:26): ~9.5 min with the medium model (separation cached), 0 must-fix, 1 true-peak note.
 - Medium model (ggml-medium-q5_0, 539 MB, SHA256 19fea4b3…) on the separated vocal: the first verse that small turned into "[끝]" / subtitle junk came out as real lyrics, and many lines improved ("보랏빛 하늘로 피어나는데", "그런 소망 따라 흩날리는 무수한 나비"). ~1.6× real time vs ~0.4× for small. Largest model is the default; `--fast` picks the smallest.
