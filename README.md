@@ -52,7 +52,7 @@ Claude는 귀가 없습니다. **sound-ear**는 노래·보컬·효과음·영�
 - "고친 판이야. 전이랑 비교해 줘"
 - "이 노래 어떤 노래인지 설명해 줘" / "가사 받아 적어 줘"
 
-**예시 보고서:** [docs/example-report/종합보고서.md](docs/example-report/종합보고서.md) — 일부러 딸깍 소리와 뚝 끊김을 넣은 40초짜리 합성곡([예시곡.mp3](docs/example-report/예시곡.mp3))을 빠른 검사로 돌린 결과입니다(16초 걸림, 둘 다 찾음).
+**예시 보고서:** [docs/example-report/종합보고서.md](docs/example-report/종합보고서.md) — 일부러 딸깍 소리와 뚝 끊김을 넣은 40초짜리 합성곡([예시곡.mp3](docs/example-report/예시곡.mp3))을 빠른 검사로 돌린 결과입니다(15초쯤 걸림, 둘 다 찾음).
 
 모델을 손으로 받고 싶을 때:
 
@@ -111,7 +111,7 @@ For each finding it makes a close-up picture and a short audio snippet, and it c
 
 **Usage:** attach an audio file and ask "listen to this and find problems". Claude runs `full` — a quick check by default (3–4 minutes for a 4-minute song) — and gives you a one-page report that starts with a one-line verdict. Ask for a detailed listen to run `--deep` (vocal separation, larger lyrics model, vocal pitch check). For best pitch results, give a vocal-only export plus the full mix.
 
-**Example report:** [docs/example-report/종합보고서.md](docs/example-report/종합보고서.md) — a 40-second synthetic song with a planted click and dropout; both found in 16 seconds.
+**Example report:** [docs/example-report/종합보고서.md](docs/example-report/종합보고서.md) — a 40-second synthetic song with a planted click and dropout; both found in about 15 seconds.
 
 **Limits:** files only (no live mic), no taste judgements; clipping on lossy files (mp3, opus) is advisory only.
 
