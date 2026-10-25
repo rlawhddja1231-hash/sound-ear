@@ -2,6 +2,16 @@
 
 Newest first. Record date, file type, what was found, false positives, misses, and threshold changes.
 
+## 2026-10-25 — Japanese stem lyrics, faster describe, vocal-only detection — v1.7.0
+- Japanese synth vocal (구마, separated stem, medium): whole-file transcription gave one made-up line ("ご視聴ありがとうございました"); splitting at pauses into ≤ 25 s pieces gave 37 real lines and was faster (317 s vs 345 s). On full mixes the same split made things worse (Korean 마법: fewer correct lines, 215 s vs 124 s), so it is used only for stems and vocal-only files.
+- Language is picked from the three loudest 30 s windows instead of the first 30 s.
+- `describe`: HPSS median filtering done once instead of three times — 69 s → 39 s on a 4-min song, identical output.
+- Vocal-only detection without separation: energy below 70 Hz < 1 % of the total (6 vocal-only files ≤ 0.0001, 7 mixes 0.09–0.48).
+- Quick `full` measured: 4-min song 3.5 min, 4:52 song 4 min (lyrics are most of it). Docs now say 3–4 min.
+- UNI SV2 demo 「목성은 사랑을 한다」 (YouTube): piano ballad where verse and chorus share one repeat letter (7×) → all were called chorus. When a letter repeats ≥ 5 times, only the repeats that share a lyric line with another repeat and are not quieter get the chorus name (7 → 4). Alone, Pray To Me and 마법 unchanged.
+- SeeU cover of the same song (YouTube): 0 must-fix, 3 to check. Same key (G major) as the UNI version.
+- Report: more than 3 🟠 of one kind are folded into one row; lossy "0 dB" wording fixed for a handful of hits.
+
 ## 2026-10-25 — setup command, quick mode by default, one-line verdict — v1.6.0
 - `setup`: installs packages, gathers attached model files (joins .part1/.part2, unpacks an essentia tar), downloads what it can reach, prints ✅/❌ and URLs for the rest. Tested on an empty home: Kim_Vocal_2.onnx downloaded from GitHub; the rest came from attached files.
 - `full` is now quick by default (no separation, small lyrics model); `--deep` is the old behaviour. Users found the 10-minute run too slow for a first look.

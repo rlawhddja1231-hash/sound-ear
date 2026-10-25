@@ -172,8 +172,10 @@ def check_levels(st, sr, probs, stats):
         spans = ", ".join(f"{fmt_t(x)[:-2]}~" for x in secs[:12])
         stats["클리핑 횟수"] = f"{len(groups)} (손실 압축이라 참고만)"
         probs.append(dict(t=0, end=None, kind="소리가 0dB까지 꽉 참", level=LEVEL_CHECK,
-                          msg=f"{len(groups)}곳에서 최대치에 닿습니다(많은 구간: {spans}). 손실 압축 파일이라 진짜로 깨졌는지는 "
-                              "원본 wav로 봐야 정확합니다. 마스터가 아주 세게 눌린 것은 맞습니다."))
+                          msg=(f"{len(groups)}곳에서 최대치에 닿습니다(주로 {spans}). " if len(groups) >= 5 else
+                               f"{len(groups)}곳({', '.join(fmt_t(a) for a, b, n in groups)})에서 최대치에 닿습니다. ")
+                          + "손실 압축 파일이라 진짜로 깨졌는지는 원본 wav로 봐야 정확합니다."
+                          + (" 마스터가 아주 세게 눌린 것은 맞습니다." if len(groups) >= 20 else "")))
         groups = []
     for a, b, n in groups[:40]:
         probs.append(dict(t=a, end=b, kind="클리핑(소리 깨짐)", level=LEVEL_MUST,
@@ -711,7 +713,24 @@ def detect_mode(path, mode):
     low = os.path.basename(path).lower()
     if any(k in low for k in ["vocal", "vox", "voice", "보컬", "목소리", "acapella", "acappella", "sv_", "synthv"]):
         return "vocal"
-    return "mix"
+    return "vocal" if looks_vocal_only(path) else "mix"
+
+
+def looks_vocal_only(path):
+    """70Hz 아래(킥·베이스) 소리가 거의 없으면 보컬만 있는 파일로 본다.
+    [확인: 10-25 보컬만 6개 0.0000~0.0001, 완성곡 6개 0.09~0.48 — 기준 0.01]"""
+    import librosa
+    r = subprocess.run(["ffmpeg", "-v", "error", "-i", path, "-t", "240", "-vn", "-f", "f32le", "-ac", "1", "-ar", "16000", "-"],
+                       capture_output=True)
+    y = np.frombuffer(r.stdout, np.float32)
+    if len(y) < 16000:
+        return False
+    S = np.abs(librosa.stft(y, n_fft=1024, hop_length=512)) ** 2
+    f = librosa.fft_frequencies(sr=16000, n_fft=1024)
+    tot = S.sum(0) + 1e-12
+    lv = 10 * np.log10(tot)
+    act = lv > np.percentile(lv, 95) - 30
+    return bool(act.any() and float((S[f < 70].sum(0) / tot)[act].mean()) < 0.01)
 
 
 def cmd_check(args):
@@ -916,26 +935,87 @@ def find_whisper_model(explicit=None):
     return None
 
 
-def transcribe(path, model_path, lang="auto", threads=None, prompt=None):
-    """whisper.cpp로 받아쓰기. 16kHz 모노로 풀어서 넣는다. [(시작초, 끝초, 글)]"""
+def _speech_chunks(y, sr=16000, max_len=25.0):
+    """조용한 틈(0.4초 넘게)에서 잘라 25초 안쪽 덩어리로 나눈다. [(시작샘플, 끝샘플)]"""
+    import librosa
+    hop = sr // 20
+    r = db(librosa.feature.rms(y=y, frame_length=hop * 2, hop_length=hop)[0])
+    if not len(r):
+        return [(0, len(y))]
+    quiet = r < float(np.percentile(r, 90)) - 30
+    cuts = [0]
+    for i, j in runs(quiet):
+        if (j - i) >= 8:
+            cuts.append((i + j) // 2 * hop)
+    cuts.append(len(y))
+    out, a, lim = [], 0, int(max_len * sr)
+    while a < len(y):
+        nxt = [c for c in cuts if a + sr * 2 < c <= a + lim]
+        b = max(nxt) if nxt else min(len(y), a + lim)
+        out.append((a, b))
+        a = b
+    # 거의 무음인 덩어리는 버림
+    keep = []
+    for a, b in out:
+        seg = y[a:b]
+        if len(seg) > sr * 0.5 and db(np.sqrt(np.mean(seg ** 2))) > float(np.percentile(r, 90)) - 35:
+            keep.append((a, b))
+    return keep
+
+
+def pick_language(y, model, sr=16000):
+    """노래가 가장 빽빽한 30초 구간 세 곳으로 언어를 정한다.
+    whisper.cpp는 처음 30초로만 언어를 정해서, 전주가 길면 엉뚱한 언어로 받아쓴다."""
+    hop = sr
+    e = np.array([np.sqrt(np.mean(y[i:i + hop] ** 2)) for i in range(0, max(1, len(y) - hop), hop)])
+    if len(e) < 5:
+        return ""
+    w = min(30, len(e))
+    score = np.convolve(e, np.ones(w), "valid")
+    picks = []
+    for _ in range(3):
+        k = int(np.argmax(score))
+        if score[k] <= 0:
+            break
+        picks.append(k)
+        score[max(0, k - w):k + w] = -1
+    tot = {}
+    for k in picks:
+        try:
+            (_, _), probs = model.auto_detect_language(np.ascontiguousarray(y[k * hop:(k + w) * hop], dtype=np.float32))
+        except Exception:
+            continue
+        for lg, pr in probs.items():
+            tot[lg] = tot.get(lg, 0) + float(pr)
+    return max(tot, key=tot.get) if tot else ""
+
+
+def transcribe(path, model_path, lang="auto", threads=None, prompt=None, chunks=False, info=None):
+    """whisper.cpp로 받아쓰기. 16kHz 모노로 풀어서 넣는다. [(시작초, 끝초, 글)]
+    chunks=True: 조용한 틈에서 25초 안쪽으로 잘라 따로 받아쓴다(분리한 목소리용 — 긴 빈 곳 뒤를 통째로 놓치던 것을 막음)."""
     from pywhispercpp.model import Model
     r = subprocess.run(["ffmpeg", "-v", "error", "-i", path, "-vn", "-f", "f32le", "-ac", "1", "-ar", "16000", "-"],
                        capture_output=True)
-    y = np.frombuffer(r.stdout, np.float32)
+    y = np.frombuffer(r.stdout, np.float32).copy()
     # suppress_nst(말이 아닌 표시 막기)+no_context(앞 줄에 끌려가지 않기): 노래에서 "(♪~♪)", "[블랙핑크 - …]"만 내던 것을 막음
     # [확인: 10-25 medium으로 일본어 「구마」 앞 45초가 '(♪~♪)' 두 줄 → 이 설정으로 가사 7줄, 「Alone」 후렴도 더 정확]
-    params = dict(language=lang if lang != "auto" else "", print_progress=False, print_realtime=False,
+    params = dict(print_progress=False, print_realtime=False,
                   n_threads=threads or max(1, os.cpu_count() or 1), suppress_blank=True, no_context=True, suppress_nst=True)
     if prompt:
         params["initial_prompt"] = prompt
     m = Model(model_path, redirect_whispercpp_logs_to=None, **params)
-    segs = m.transcribe(y)
+    if lang in (None, "", "auto"):
+        lang = pick_language(y, m) or ""
+    if info is not None:
+        info["lang"] = lang or "auto"
+    pieces = _speech_chunks(y) if chunks else [(0, len(y))]
     out = []
-    for sg in segs:
-        txt = sg.text.strip()
-        if not txt:
-            continue
-        out.append((sg.t0 / 100.0, sg.t1 / 100.0, txt))
+    for a, b in pieces:
+        for sg in m.transcribe(np.ascontiguousarray(y[a:b]), language=lang):
+            txt = sg.text.strip()
+            if not txt:
+                continue
+            out.append((a / 16000 + sg.t0 / 100.0, a / 16000 + sg.t1 / 100.0, txt))
     return out
 
 
@@ -996,7 +1076,8 @@ def cmd_words(args):
         t0 = 0.0
     import time
     st = time.time()
-    segs = transcribe(src, model, lang=args.lang, prompt=args.prompt)
+    winfo = {}
+    segs = transcribe(src, model, lang=args.lang, prompt=args.prompt, chunks=looks_vocal_only(src), info=winfo)
     took = time.time() - st
     if tmp:
         os.remove(tmp)
@@ -1004,7 +1085,7 @@ def cmd_words(args):
     out = args.out or (os.path.splitext(os.path.basename(args.file))[0] + "_가사")
     os.makedirs(out, exist_ok=True)
     lines = [f"# 받아쓰기 — {os.path.basename(args.file)}", "",
-             f"- 모델: {os.path.basename(model)} / 언어: {args.lang} / 걸린 시간: {took:.0f}초",
+             f"- 모델: {os.path.basename(model)} / 언어: {winfo.get('lang', args.lang)} / 걸린 시간: {took:.0f}초",
              "- 노래 가사는 반주·효과 때문에 틀리기 쉽습니다. **보컬만 있는 파일**일수록 정확합니다.",
              "- '지어낸 말일 수 있음' 표시는 음악 구간에서 AI가 흔히 지어내는 말입니다.", ""]
     for a, b, t, flag in segs:
@@ -1173,9 +1254,19 @@ def genre_ko(g):
 # ---------------------------------------------------------------- 곡 설명 (구성·악기·분위기)
 def _feat_frames(y, sr, hop):
     import librosa
-    S = np.abs(librosa.stft(y, n_fft=2048, hop_length=hop))
+    from scipy.ndimage import median_filter
+    D = librosa.stft(y, n_fft=2048, hop_length=hop)
+    S = np.abs(D)
     freqs = librosa.fft_frequencies(sr=sr, n_fft=2048)
-    H, P = librosa.decompose.hpss(S, margin=2.0)
+    # HPSS는 느려서(4분 곡 한 번에 약 15초) 중앙값 거르기를 한 번만 하고 두 가지 세기(margin 2, 3)로 나눠 쓴다
+    # [확인: 10-25 곡 설명에서 HPSS를 세 번 돌려 46초 걸리던 것]
+    hm = median_filter(S, size=(1, 31), mode="reflect")
+    pm = median_filter(S, size=(31, 1), mode="reflect")
+    sm = librosa.util.softmask
+    H = S * sm(hm, pm * 2.0, power=2)
+    P = S * sm(pm, hm * 2.0, power=2)
+    yh = librosa.istft(D * sm(hm, pm * 3.0, power=2), hop_length=hop, length=len(y))
+    yp = librosa.istft(D * sm(pm, hm * 3.0, power=2), hop_length=hop, length=len(y))
     tot = (S ** 2).sum(axis=0) + 1e-12
     perc = (P ** 2).sum(axis=0) / tot
     low = (S[freqs < 150] ** 2).sum(axis=0) / tot
@@ -1183,10 +1274,10 @@ def _feat_frames(y, sr, hop):
     cent = librosa.feature.spectral_centroid(S=S, sr=sr)[0]
     rms = librosa.feature.rms(S=S, frame_length=2048)[0]
     onset = librosa.onset.onset_strength(S=librosa.amplitude_to_db(P, ref=np.max), sr=sr)
-    return dict(S=S, H=H, perc=perc, low=low, mid=mid, cent=cent, rms=rms, onset=onset[: len(rms)])
+    return dict(S=S, H=H, perc=perc, low=low, mid=mid, cent=cent, rms=rms, onset=onset[: len(rms)], yh=yh, yp=yp)
 
 
-def _segments(y, sr, hop, dur):
+def _segments(y, sr, hop, dur, yp=None):
     """곡을 덩어리로 나누고(소리가 바뀌는 곳 찾기), 닮은 덩어리끼리 같은 글자(A, B, C…)를 붙인다."""
     import librosa
     from scipy.ndimage import median_filter
@@ -1202,7 +1293,8 @@ def _segments(y, sr, hop, dur):
     M = librosa.util.sync(mfcc, beats, aggregate=np.mean)
     E = librosa.util.sync(rms, beats, aggregate=np.mean)
     # 드럼이 들어오고 빠지는 곳도 '소리가 바뀌는 곳'으로 본다 [확인: 10-25 합성 시험곡에서 드럼 없는 전주가 첫 절에 묻힘]
-    yp = librosa.effects.percussive(y, margin=3.0)
+    if yp is None:
+        yp = librosa.effects.percussive(y, margin=3.0)
     prm = librosa.amplitude_to_db(librosa.feature.rms(y=yp, hop_length=hop), ref=np.max)
     PR = librosa.util.sync(prm, beats, aggregate=np.mean)
     bt = librosa.frames_to_time(np.concatenate([[0], beats]), sr=sr, hop_length=hop)
@@ -1336,7 +1428,11 @@ def cmd_describe(args):
             if vocal_path:
                 # 분리한 목소리로 받아쓰고, 빈 곳은 원곡 받아쓰기로 메운다
                 # [확인: 10-25 「Alone」 — 목소리만 넣으면 대부분 더 정확했지만 첫 절(0:14~0:45)을 통째로 '[끝]'으로 놓침]
-                ws = clean_segments(transcribe(vocal_path, model, lang=args.lang))
+                # 조용한 틈에서 25초 안쪽으로 잘라 따로 받아쓴다 — 통째로 넣으면 첫 빈 곳 뒤를 다 놓침
+                # [확인: 10-25 일본어 「구마」 분리 목소리 medium: 통째로 1줄(지어낸 말) → 잘라서 37줄, 345초 → 317초]
+                linfo = {}
+                ws = clean_segments(transcribe(vocal_path, model, lang=args.lang, chunks=True, info=linfo))
+                glang = linfo.get("lang", args.lang)
                 words = list(ws)
                 # 목소리는 나는데 받아쓴 말이 없는 빈 곳(3초 넘게)만 원곡에서 잘라 다시 받아쓴다
                 vy_, vsr_ = librosa.load(vocal_path, sr=16000, mono=True)
@@ -1354,7 +1450,7 @@ def cmd_describe(args):
                     clip = os.path.join(out, "_gap.wav")
                     subprocess.run(["ffmpeg", "-v", "error", "-y", "-ss", f"{max(0, ga - 0.5):.2f}", "-to", f"{gb + 0.5:.2f}", "-i", path,
                                     "-ac", "1", "-ar", "16000", clip], check=True)
-                    for a, b, t, fl in clean_segments(transcribe(clip, model, lang=args.lang)):
+                    for a, b, t, fl in clean_segments(transcribe(clip, model, lang=glang)):
                         a += max(0, ga - 0.5)
                         b += max(0, ga - 0.5)
                         if not any(min(b, b2) - max(a, a2) > 0.3 * (b - a) for a2, b2, _, _ in ws):
@@ -1383,7 +1479,7 @@ def cmd_describe(args):
         voc = (voc | vstem) if have_words else vstem
         have_words = True if not have_words else have_words
 
-    segs, tempo, ssim = _segments(y, sr, hop, dur)
+    segs, tempo, ssim = _segments(y, sr, hop, dur, yp=f["yp"])
     mg = []
     for sgm in segs:  # 이웃한 같은 글자 덩어리 중 짧은 것(10초 미만)만 앞에 붙임 — 긴 반복은 따로 보여 준다
         if mg and mg[-1][2] == sgm[2] and (sgm[1] - sgm[0] < 10 or mg[-1][1] - mg[-1][0] < 10):
@@ -1409,7 +1505,7 @@ def cmd_describe(args):
     # 악기 있는지(상대 비교)
     # 드럼: 때리는 소리만 뽑아(HPSS) 그 '때림'이 박자마다 규칙적으로 반복되는지(자기상관)로 본다.
     # [확인: 10-24 세기 비율만 쓰니 전부 '없음' → 규칙성으로 바꾸자 보컬만 있는 곡 0.25~0.28, 드럼 있는 곡 0.5~0.9로 갈림]
-    yh, yp = librosa.effects.hpss(y, margin=3.0)
+    yh, yp = f["yh"], f["yp"]
     env = librosa.onset.onset_strength(y=yp, sr=sr, hop_length=hop)
     lag = int(round(60.0 / max(tempo, 40) * sr / hop))
     prms = librosa.feature.rms(y=yp, hop_length=hop)[0]
@@ -1505,8 +1601,30 @@ def cmd_describe(args):
             others = [means[l] for l in means if l != top]
             if others and means[top] >= max(others) - 0.5 and means[top] >= np.mean(others) + 1.5:
                 chorus = top
+    # 한 글자가 5번 넘게 나오면(피아노 발라드처럼 절과 후렴이 같은 글자로 묶임) 훅 가사가 겹치고 세기도 안 작은 것만 후렴으로 본다
+    # [확인: 10-25 UNI 「목성은 사랑을 한다」 B가 7번 → 전부 '후렴'으로 나옴]
+    chorus_rows = None
+    if chorus and len(by.get(chorus, [])) >= 5:
+        rs = by[chorus]
+        med_e = float(np.median([x["e"] for x in rs]))
+
+        def lines_of(r):
+            return [la for la in r["words"].split(" / ") if len(la) >= 8]
+        hook = set()
+        for i in range(len(rs)):
+            for j in range(len(rs)):
+                if i == j or abs(rs[i]["a"] - rs[j]["a"]) < 15:
+                    continue
+                if any(bigr(la) and bigr(lb) and len(bigr(la) & bigr(lb)) / len(bigr(la) | bigr(lb)) >= 0.5
+                       for la in lines_of(rs[i]) for lb in lines_of(rs[j])):
+                    hook.add(id(rs[i]))
+        chorus_rows = {id(r) for r in rs if id(r) in hook and r["e"] >= med_e - 1.0}
+        if len(chorus_rows) < 2:
+            chorus_rows = None
     count = defaultdict(int)
     total = {lab: sum(1 for r in rows if r["lab"] == lab) for lab in set(r["lab"] for r in rows)}
+    ch_total = len(chorus_rows) if chorus_rows else total.get(chorus, 0)
+    ch_k = 0
     names = []
     for i, r in enumerate(rows):
         count[r["lab"]] += 1
@@ -1514,8 +1632,9 @@ def cmd_describe(args):
         if not sings(r):
             before_first = all(not sings(x) for x in rows[:i])
             nm = "전주" if before_first else ("후주(끝)" if i == len(rows) - 1 else "간주(노래 없음)")
-        elif r["lab"] == chorus:
-            nm = f"후렴 {k}번째" if total[r["lab"]] > 1 else "후렴"
+        elif r["lab"] == chorus and (chorus_rows is None or id(r) in chorus_rows):
+            ch_k += 1
+            nm = f"후렴 {ch_k}번째" if ch_total > 1 else "후렴"
         elif r["e"] < song_db - 9:
             nm = f"조용한 노래 부분 {r['lab']}"
         else:
@@ -1744,6 +1863,18 @@ def cmd_full(args):
                 # 분리한 목소리의 틱은 분리하다 남은 소리일 때가 많다 [확인: 10-25 구마 커버 1:30.3 — 그림에 아무것도 안 보임]
                 p = dict(p, level=LEVEL_CHECK, msg=p["msg"] + " (분리한 목소리에서만 보임 — 분리하다 남은 소리일 수 있으니 원곡에서 들어 보세요)")
             items.append(dict(src=src, **p))
+    # 같은 종류의 🟠가 많으면 한 줄로 묶는다(완성곡의 딸깍은 하이햇·자음일 때가 많아 표만 길어짐) [확인: 10-25 「마법」 빠른 검사 딸깍 8줄]
+    grouped = []
+    for src in ("원곡", "목소리"):
+        for kind in ("딸깍·틱 소리", "노트 끝 틱", "뚝 끊김", "음이 순간 튐"):
+            same = [p for p in items if p["src"] == src and p["kind"] == kind and p["level"] == LEVEL_CHECK]
+            if len(same) > 3:
+                ts_ = ", ".join(p.get("시각", fmt_t(p.get("t", 0))) for p in same[:12]) + (" …" if len(same) > 12 else "")
+                for p in same:
+                    items.remove(p)
+                grouped.append(dict(src=src, kind=f"{kind} {len(same)}곳", level=LEVEL_CHECK, t=same[0].get("t", 0), 시각="여러 곳",
+                                    msg=same[0]["msg"] + f" 시각: {ts_}"))
+    items += grouped
     order = {LEVEL_MUST: 0, LEVEL_CHECK: 1, LEVEL_INFO: 2}
     items.sort(key=lambda p: (order.get(p["level"], 3), p.get("t", 0)))
     n_must = sum(1 for p in items if p["level"] == LEVEL_MUST)

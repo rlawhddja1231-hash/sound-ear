@@ -45,7 +45,7 @@ Claude는 귀가 없습니다. **sound-ear**는 노래·보컬·효과음·영�
 
 **처음 한 번:** "sound-ear 준비해 줘"라고 하면 Claude가 `setup`으로 필요한 프로그램과 모델을 한 번에 확인·설치합니다. 인터넷이 막혀 못 받은 모델은 받는 주소를 알려 주니, 받아서 채팅에 올리고 다시 "준비해 줘" 하면 알아서 제자리에 둡니다.
 
-그다음엔 소리 파일을 채팅에 올리고 이렇게 말하면 됩니다. Claude는 `full` 명령 하나로 **빠른 검사(4분 곡이면 2~3분)** 를 하고 **종합보고서** 맨 위에 한마디 평가를 줍니다. "자세히 들어 줘"라고 하면 `--deep`으로 목소리를 갈라 음정까지 봅니다(몇 배 느림).
+그다음엔 소리 파일을 채팅에 올리고 이렇게 말하면 됩니다. Claude는 `full` 명령 하나로 **빠른 검사(4분 곡이면 3~4분)** 를 하고 **종합보고서** 맨 위에 한마디 평가를 줍니다. "자세히 들어 줘"라고 하면 `--deep`으로 목소리를 갈라 음정까지 봅니다(몇 배 느림).
 
 - "이 노래 들어 보고 이상한 데 찾아 줘"
 - "보컬만 뽑은 거야. 음정이랑 음 튀는 데 봐 줘"
@@ -109,7 +109,7 @@ For each finding it makes a close-up picture and a short audio snippet, and it c
 
 **Setup:** say "set up sound-ear" once. Claude runs `setup`, which installs packages and fetches the models it can reach; for any it cannot download it prints the URL, and you can attach the file and run setup again (split .part1/.part2 files are joined automatically).
 
-**Usage:** attach an audio file and ask "listen to this and find problems". Claude runs `full` — a quick check by default (2–3 minutes for a 4-minute song) — and gives you a one-page report that starts with a one-line verdict. Ask for a detailed listen to run `--deep` (vocal separation, larger lyrics model, vocal pitch check). For best pitch results, give a vocal-only export plus the full mix.
+**Usage:** attach an audio file and ask "listen to this and find problems". Claude runs `full` — a quick check by default (3–4 minutes for a 4-minute song) — and gives you a one-page report that starts with a one-line verdict. Ask for a detailed listen to run `--deep` (vocal separation, larger lyrics model, vocal pitch check). For best pitch results, give a vocal-only export plus the full mix.
 
 **Example report:** [docs/example-report/종합보고서.md](docs/example-report/종합보고서.md) — a 40-second synthetic song with a planted click and dropout; both found in 16 seconds.
 
