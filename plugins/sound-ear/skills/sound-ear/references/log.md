@@ -2,6 +2,13 @@
 
 Newest first. Record date, file type, what was found, false positives, misses, and threshold changes.
 
+## 2026-10-25 — vocal separation — v1.4.0
+- Added `separate` (UVR MDX-Net Kim_Vocal_2.onnx via onnxruntime, single pass; `--clean` averages a sign-flipped second pass, 2× slower, −36 dB difference). ~1× real time on 2 cores.
+- On the new SeeU demo "Alone": separated vocals were clean. Transcribing the vocal stem split lines properly and fixed many words ("아픔", "지나쳐 가는", "쇼윈도"), and singing start times became exact (0:06 instead of 0:00 on a 30 s clip). But whisper returned only "[끝]" for the first verse on the stem → describe now transcribes both and fills gaps from the mix ("원곡에서 받아씀").
+- Singing presence from stem energy: threshold p90 − 20 dB marked the outro as sung (backing leakage) → p90 − 14 dB.
+- Pitch check on the separated vocal: 0 glitches, 1 borderline off-pitch (a glide). Key estimated from the vocal alone was B♭ major (melody), mix/backing said E♭ major → `check --mode vocal` now takes the key from a sibling 반주.wav (or `--key-from`); out-of-key flags dropped 13 → 4.
+- Whole describe on a 4:26 song with separation + double transcription + music AI: ~4.7 min. Self-test 7/7.
+
 ## 2026-10-25 — full workflow on a Korean vocal-synth pop song — v1.3.1
 - New SeeU voice demo "Alone" (4:26, full mix, lossy recording). check + describe (lyrics + music AI) took ~3.5 min.
 - Click false positive at 1:00.4 was a kick drum (same shape as the kicks around it). Clicks are now skipped when low-band (<150 Hz) energy in the next 40 ms rises >1.25× in mixes (>2× otherwise). Self-test still 7/7.

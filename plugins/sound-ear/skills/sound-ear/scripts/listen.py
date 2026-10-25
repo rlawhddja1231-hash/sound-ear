@@ -6,6 +6,7 @@
   python3 listen.py cut    노래.wav 1:23.5 [--len 2] [--out 폴더]
   python3 listen.py compare 앞판.wav 새판.wav [--out 폴더]
   python3 listen.py describe 노래.wav [--words 가사폴더/words.json] [--out 폴더]
+  python3 listen.py separate 노래.wav [--out 폴더]   (보컬.wav, 반주.wav)
   python3 listen.py words  노래.wav [--lang ko] [--model ggml-small-q5_1.bin] [--out 폴더]
 
 check   : 소리 전체를 검사해 보고서(보고서.md, result.json)와 그림을 만든다.
@@ -700,7 +701,20 @@ def cmd_check(args):
 
     y = librosa.resample(st.mean(axis=1), orig_sr=sr, target_sr=22050)
     ysr = 22050
-    scale = estimate_key_tempo(y, ysr, stats, probs)
+    # 목소리만 있는 파일은 멜로디만 보고 조를 잘못 짚기 쉽다 → 반주 파일이 있으면 조는 반주에서 잰다
+    # [확인: 10-25 「Alone」 분리 보컬은 내림나장조, 원곡·반주는 내림마장조 — 조에 없는 음 13곳이 헛짚음이었음]
+    key_src = args.key_from
+    if not key_src and mode == "vocal":
+        sib = os.path.join(os.path.dirname(os.path.abspath(path)), "반주.wav")
+        if os.path.isfile(sib):
+            key_src = sib
+    if key_src and os.path.isfile(key_src):
+        kst, ksr = load(key_src)
+        ky = librosa.resample(kst.mean(axis=1), orig_sr=ksr, target_sr=22050)
+        scale = estimate_key_tempo(ky, 22050, stats, probs)
+        stats["조(키, 추정)"] += f" (조는 {os.path.basename(key_src)}에서 잼)"
+    else:
+        scale = estimate_key_tempo(y, ysr, stats, probs)
     pitch = None
     if mode == "vocal":
         pitch = check_pitch(y, ysr, probs, stats, scale)
@@ -955,6 +969,76 @@ def cmd_words(args):
         print(f"  {fmt_t(a)} {t}" + (f"  ({flag})" if flag else ""))
 
 
+# ---------------------------------------------------------------- 보컬 분리 (목소리 / 반주)
+SEP_URL = "https://github.com/TRvlvr/model_repo/releases/download/all_public_uvr_models/Kim_Vocal_2.onnx"
+
+
+def find_sep_model(explicit=None):
+    for c in [explicit, os.environ.get("SOUND_EAR_SEP_MODEL"), os.path.expanduser("~/.cache/sound-ear/Kim_Vocal_2.onnx"),
+              os.path.join(os.getcwd(), "Kim_Vocal_2.onnx")]:
+        if c and os.path.isfile(c):
+            return c
+    return None
+
+
+def separate_vocals(path, model, out_dir, clean=False):
+    """UVR MDX-Net(Kim_Vocal_2)으로 목소리와 반주를 가른다. 44.1kHz 스테레오 wav 두 개를 만든다.
+    [확인: 10-25 2코어에서 노래 길이와 비슷한 시간(30초 곡 32초), clean은 두 배]"""
+    import librosa
+    import onnxruntime as ort
+    import soundfile as sf
+    N_FFT, HOP, DIM_F, DIM_T = 7680, 1024, 3072, 256
+    CHUNK = HOP * (DIM_T - 1)
+    TRIM = N_FFT // 2
+    GEN = CHUNK - 2 * TRIM
+    r = subprocess.run(["ffmpeg", "-v", "error", "-i", path, "-vn", "-f", "f32le", "-ac", "2", "-ar", "44100", "-"], capture_output=True)
+    mix = np.frombuffer(r.stdout, np.float32).reshape(-1, 2).T.astype(np.float32)
+    n = mix.shape[1]
+    pad = GEN - n % GEN
+    mp = np.concatenate([np.zeros((2, TRIM), np.float32), mix, np.zeros((2, pad), np.float32), np.zeros((2, TRIM), np.float32)], 1)
+    so = ort.SessionOptions()
+    so.intra_op_num_threads = max(1, os.cpu_count() or 1)
+    sess = ort.InferenceSession(model, sess_options=so, providers=["CPUExecutionProvider"])
+    nb = N_FFT // 2 + 1
+
+    def stft2(w):
+        S = [librosa.stft(w[c], n_fft=N_FFT, hop_length=HOP, window="hann", center=True, pad_mode="reflect") for c in range(2)]
+        return np.stack([S[0].real, S[0].imag, S[1].real, S[1].imag])[:, :DIM_F, :][None].astype(np.float32)
+
+    def istft2(x):
+        full = np.zeros((4, nb, DIM_T), np.float32)
+        full[:, :DIM_F] = x[0]
+        return np.stack([librosa.istft(full[2 * c] + 1j * full[2 * c + 1], n_fft=N_FFT, hop_length=HOP, window="hann",
+                                       center=True, length=CHUNK) for c in range(2)])
+    outs = []
+    total = (n + pad) // GEN
+    for k, i in enumerate(range(0, n + pad, GEN)):
+        spec = stft2(mp[:, i:i + CHUNK])
+        o = sess.run(None, {"input": spec})[0]
+        if clean:  # 부호를 뒤집어 한 번 더 돌려 평균 — 잡음이 조금 줄고 두 배 느림
+            o = (o - sess.run(None, {"input": -spec})[0]) / 2
+        outs.append(istft2(o)[:, TRIM:-TRIM])
+        if (k + 1) % 10 == 0:
+            print(f"  보컬 분리 {k + 1}/{total}")
+    voc = np.concatenate(outs, 1)[:, :n] * 1.009
+    inst = mix - voc
+    os.makedirs(out_dir, exist_ok=True)
+    vp, ip = os.path.join(out_dir, "보컬.wav"), os.path.join(out_dir, "반주.wav")
+    sf.write(vp, voc.T, 44100, subtype="PCM_16")
+    sf.write(ip, inst.T, 44100, subtype="PCM_16")
+    return vp, ip
+
+
+def cmd_separate(args):
+    model = find_sep_model(args.model)
+    if not model:
+        sys.exit(f"보컬 분리 모델(Kim_Vocal_2.onnx)이 없습니다. ~/.cache/sound-ear/ 에 두거나 --model 로 주세요.\n받는 곳: {SEP_URL}")
+    out = args.out or (os.path.splitext(os.path.basename(args.file))[0] + "_분리")
+    import time
+    t0 = time.time()
+    vp, ip = separate_vocals(args.file, model, out, clean=args.clean)
+    print(f"[완료] {vp}\n       {ip}\n       걸린 시간 {time.time() - t0:.0f}초")
+
 # ---------------------------------------------------------------- 음악 AI (Essentia: 악기·장르·분위기)
 INST_KO = {"accordion": "아코디언", "acousticbassguitar": "어쿠스틱 베이스", "acousticguitar": "어쿠스틱 기타", "bass": "베이스",
            "beat": "비트", "bell": "종", "bongo": "봉고", "brass": "금관악기", "cello": "첼로", "clarinet": "클라리넷",
@@ -1166,6 +1250,20 @@ def cmd_describe(args):
     rms_db = db(f["rms"])
     song_db = float(np.percentile(rms_db, 90))
 
+    # 보컬 분리(있으면): 반주가 빽빽해도 가사·노래 위치를 정확하게 [확인: 10-25 「Alone」 30초에서 가사·시작 시각이 더 정확해짐]
+    vocal_path = None
+    if not args.no_separate:
+        sm_ = find_sep_model(args.sep_model)
+        if sm_:
+            cached = os.path.join(out, "보컬.wav")
+            if os.path.isfile(cached) and os.path.getmtime(cached) >= os.path.getmtime(path):
+                vocal_path = cached
+            else:
+                print("목소리와 반주를 가르는 중… (노래 길이만큼 걸림)")
+                try:
+                    vocal_path, _ = separate_vocals(path, sm_, out)
+                except Exception as e:  # noqa
+                    print("보컬 분리를 못 했습니다:", e)
     # 가사(말) — 모델이 있으면 받아쓰기, 이미 한 결과(words.json)가 있으면 그걸 씀
     words = []
     wj = args.words
@@ -1175,14 +1273,37 @@ def cmd_describe(args):
         model = find_whisper_model(args.model)
         if model:
             print("가사 받아쓰는 중… (4분 곡에 약 2분)")
-            words = clean_segments(transcribe(path, model, lang=args.lang))
+            if vocal_path:
+                # 분리한 목소리로 받아쓰고, 빈 곳은 원곡 받아쓰기로 메운다
+                # [확인: 10-25 「Alone」 — 목소리만 넣으면 대부분 더 정확했지만 첫 절(0:14~0:45)을 통째로 '[끝]'으로 놓침]
+                ws = clean_segments(transcribe(vocal_path, model, lang=args.lang))
+                print("빈 곳을 메우려고 원곡도 받아쓰는 중…")
+                wm = clean_segments(transcribe(path, model, lang=args.lang))
+                words = list(ws)
+                for a, b, t, fl in wm:
+                    if not any(min(b, b2) - max(a, a2) > 0.3 * (b - a) for a2, b2, _, _ in ws):
+                        words.append((a, b, t, fl or "원곡에서 받아씀"))
+                words.sort(key=lambda w: w[0])
+            else:
+                words = clean_segments(transcribe(path, model, lang=args.lang))
             json.dump([dict(start=a, end=b, text=t, flag=fl) for a, b, t, fl in words],
                       open(os.path.join(out, "words.json"), "w", encoding="utf-8"), ensure_ascii=False, indent=1)
     voc = np.zeros(len(ft), bool)
+    def ok(fl):
+        return (not fl) or fl == "원곡에서 받아씀"
     for a, b, t, fl in words:
-        if not fl:
+        if ok(fl):
             voc |= (ft >= a) & (ft < b)
     have_words = bool(words)
+    # 분리된 보컬이 있으면 '노래 있는 곳'을 목소리 세기로 다시 정한다(받아쓰기 빈틈 보완)
+    if vocal_path:
+        vy, _ = librosa.load(vocal_path, sr=sr, mono=True)
+        vr = librosa.feature.rms(y=vy, hop_length=hop)[0]
+        vr = np.pad(vr, (0, max(0, len(ft) - len(vr))))[: len(ft)]
+        vdb = db(np.convolve(vr, np.ones(20) / 20, mode="same"))
+        vstem = vdb > float(np.percentile(vdb, 90)) - 14  # 분리가 덜 된 반주(새는 소리)를 노래로 보지 않게
+        voc = (voc | vstem) if have_words else vstem
+        have_words = True if not have_words else have_words
 
     segs, tempo, ssim = _segments(y, sr, hop, dur)
     mg = []
@@ -1202,7 +1323,7 @@ def cmd_describe(args):
         low = float(np.mean(f["low"][m]))
         ons = float(np.mean(f["onset"][m])) if len(f["onset"]) == len(m) else 0.0
         vfrac = float(np.mean(voc[m])) if have_words else None
-        txt = [t for (wa, wb, t, fl) in words if not fl and a <= (wa + wb) / 2 < b]
+        txt = [t for (wa, wb, t, fl) in words if ok(fl) and a <= (wa + wb) / 2 < b]
         rows.append(dict(a=a, b=b, lab=lab, e=e, perc=perc, low=low, ons=ons, v=vfrac, words=" / ".join(txt)))
     if not rows:
         sys.exit("구간을 나누지 못했습니다(소리가 너무 짧음).")
@@ -1380,7 +1501,7 @@ def cmd_describe(args):
                if ai is not None else "※ 악기는 '드럼(때리는 소리)'과 '저음(베이스·킥)'만 가려냅니다. 악기 이름·장르·분위기 AI(Essentia 모델 파일)가 있으면 더 자세히 들립니다.")]
     if have_words:
         # 반복되는 가사(훅·후렴구): 비슷한 줄이 다른 시각에 또 나오면 묶어서 보여 준다
-        good = [(a, b, t) for a, b, t, fl in words if not fl and len(t) >= 6]
+        good = [(a, b, t) for a, b, t, fl in words if ok(fl) and len(t) >= 6]
         used = set()
         hooks = []
         for i in range(len(good)):
@@ -1448,6 +1569,7 @@ def main():
     c.add_argument("--mode", default="auto", choices=["auto", "vocal", "mix"])
     c.add_argument("--out")
     c.add_argument("--max-zoom", type=int, default=12)
+    c.add_argument("--key-from", help="조(키)를 잴 다른 파일(반주·원곡). 보컬.wav 옆에 반주.wav가 있으면 자동")
     c.set_defaults(fn=cmd_check)
     k = sub.add_parser("cut")
     k.add_argument("file")
@@ -1473,6 +1595,14 @@ def main():
     d.add_argument("--no-words", action="store_true")
     d.add_argument("--essentia", help="Essentia 모델 폴더")
     d.add_argument("--no-ai", action="store_true", help="음악 AI(악기·장르·분위기) 끄기")
+    d.add_argument("--no-separate", action="store_true", help="보컬 분리 끄기")
+    d.add_argument("--sep-model", help="Kim_Vocal_2.onnx 경로")
+    sp = sub.add_parser("separate", help="목소리와 반주 가르기 (보컬.wav, 반주.wav)")
+    sp.add_argument("file")
+    sp.add_argument("--model")
+    sp.add_argument("--clean", action="store_true", help="두 번 돌려 잡음을 조금 더 줄임(두 배 느림)")
+    sp.add_argument("--out")
+    sp.set_defaults(fn=cmd_separate)
     d.add_argument("--out")
     d.set_defaults(fn=cmd_describe)
     m = sub.add_parser("compare")

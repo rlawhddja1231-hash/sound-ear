@@ -8,7 +8,7 @@ license: MIT
 
 Claude has no ears. This skill turns an audio file into **numbers and pictures** with `scripts/listen.py`, so Claude can inspect it, point at exact timestamps, and explain how to fix each problem. Reply to the user in their own language (the report and chart labels are in Korean; translate them when the user writes in another language).
 
-What it cannot do: listen live through a microphone or judge taste. Lyrics need a whisper model file; instrument, genre and mood names need Essentia model files (see setup). Pitch checks need a **vocal-only** file; with a full mix the accompaniment confuses pitch tracking.
+What it cannot do: listen live through a microphone or judge taste. Lyrics need a whisper model file; instrument, genre and mood names need Essentia model files (see setup). Pitch checks need a **vocal-only** file; for a full mix, separate it first (see 2b).
 
 ## 1. Setup (once per session)
 
@@ -24,6 +24,8 @@ echo "$L"
 **Lyrics / speech (optional):** `pip install pywhispercpp` and a whisper.cpp model file `ggml-*.bin` from https://huggingface.co/ggerganov/whisper.cpp (recommended: `ggml-small-q5_1.bin`, 190 MB, MIT). Put it in `~/.cache/sound-ear/` or pass `--model`, or set `SOUND_EAR_MODEL`. If the sandbox cannot reach Hugging Face, ask the user to download the file and attach it. Without a model, `describe` still works but guesses where the singing is from loudness only.
 
 **Instruments, genre and mood (optional):** `pip install essentia-tensorflow` and these files from https://essentia.upf.edu/models/ (about 26 MB; **CC BY-NC-ND 4.0, non-commercial** — never bundle or redistribute them, the user downloads them): `feature-extractors/discogs-effnet/discogs-effnet-bs64-1.pb`, and from `classification-heads/`: `mtg_jamendo_instrument-discogs-effnet-1.pb/.json` (40 instruments), `genre_discogs400-discogs-effnet-1.pb/.json` (400 genres), `mtg_jamendo_moodtheme-discogs-effnet-1.pb/.json` (56 moods). Put them in `~/.cache/sound-ear/essentia/` or pass `--essentia DIR` / set `SOUND_EAR_ESSENTIA`. About 6 s for a 4-minute song.
+
+**Vocal separation (optional, recommended for full mixes):** `pip install onnxruntime` and the UVR MDX-Net model `Kim_Vocal_2.onnx` (67 MB) from the Ultimate Vocal Remover model repo: https://github.com/TRvlvr/model_repo/releases/download/all_public_uvr_models/Kim_Vocal_2.onnx → `~/.cache/sound-ear/` (or `--sep-model`, `SOUND_EAR_SEP_MODEL`). Not bundled; download it. Takes about as long as the song on 2 CPU cores.
 
 Self-test (optional, ~20 s): `python3 "$(dirname "$L")/../tests/selftest.py"` → should print `PASS` (7 planted problems found, none extra).
 
@@ -57,6 +59,13 @@ Self-test (optional, ~20 s): `python3 "$(dirname "$L")/../tests/selftest.py"` �
 python3 "$L" describe song.mp3 --out song_described          # transcribes too if a model is found
 python3 "$L" words song.mp3 --lang ko --out song_lyrics      # lyrics/speech only; also writes 자막.srt
 python3 "$L" describe song.mp3 --words song_lyrics/words.json # reuse an earlier transcription
+```
+
+With the separation model, `describe` first splits the song into `보컬.wav` and `반주.wav` in the output folder (reused on later runs), transcribes the vocal stem, fills gaps from the full mix (lines marked "원곡에서 받아씀"), and uses the vocal stem to find where singing is. You can also run the pitch check on a full mix this way:
+
+```bash
+python3 "$L" separate song.mp3 --out stems            # stems/보컬.wav, stems/반주.wav
+python3 "$L" check stems/보컬.wav --mode vocal        # key is taken from stems/반주.wav automatically
 ```
 
 `describe` writes `곡설명.md`, `describe.json` and `곡흐름.png`: a one-line mood guess, key and tempo, a timeline table (section, repeat letter, loudness bar, drums, bass, singing, lyrics), a plain-language "as heard" walkthrough, repeated lyric hooks, and the full lyrics. Open the picture before you speak.
