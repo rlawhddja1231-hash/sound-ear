@@ -20,6 +20,7 @@ Claude는 귀가 없습니다. **sound-ear**는 노래·보컬·효과음·영�
 | **곡 설명** | 전주·절·후렴·간주 같은 구성, 반복되는 부분, 드럼·저음, 세기 변화, 분위기, 반복되는 가사(훅) |
 | **보컬 분리** | 완성곡에서 목소리와 반주를 갈라 가사·음정을 더 정확하게 (UVR 모델) |
 | **악기·장르·분위기 (음악 AI)** | 피아노·기타·신스·현악기 등 40가지 악기, 장르 400가지, 분위기 56가지를 구간별로 (Essentia) |
+| **출처 검사 (v1.8.1)** | 꼬리표(메타데이터)·C2PA 출처 서명·파일 안 글자로 수노·우디오 같은 데서 만든 파일인지 확인. 확실할 때만 "확인됨", 없으면 "모름" |
 | **가사 대조 (v1.8)** | 내가 쓴 가사 txt를 주면 들린 것과 글자(자모) 단위로 맞춰 **발음이 뭉개진 줄·글자**를 찾고 그 자리를 잘라 둠 |
 
 그리고 문제마다 **확대 그림**과 **그 부분만 자른 소리 조각**을 만들어서 바로 들어 볼 수 있게 합니다. 고친 뒤에는 **앞판·새판 비교**도 합니다.
@@ -106,6 +107,7 @@ python3 plugins/sound-ear/skills/sound-ear/tests/mixtest.py
 - **Describe:** sections (intro, verse, chorus, breaks), repeats, drums and bass, loudness changes, mood, repeated lyric hooks
 - **Vocal separation:** split a full mix into vocals and backing (UVR MDX-Net, optional model download) for better lyrics and pitch checks on finished songs
 - **Instruments, genre, mood (music AI):** 40 instruments, 400 genres, 56 moods per section with optional Essentia models (non-commercial license; download them yourself)
+- **Origin check (v1.8.1):** reads tags, C2PA provenance manifests and generator names in the file (Suno, Udio, …) and says "confirmed" only when something names the maker; no audio-only AI score (see CHANGELOG for why)
 - **Lyrics comparison (v1.8):** give it the lyrics you typed into the synth and it aligns them with what was heard (Korean at jamo level, Japanese via kana) to flag garbled syllables, with a snippet per flagged line
 - **Also new in 1.8:** a self-contained `보고서.html` report with embedded pictures and ▶ audio snippets, step-by-step progress with time remaining (`진행.txt`), and hour-long files handled in 10-minute pieces
 

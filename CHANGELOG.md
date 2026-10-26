@@ -4,6 +4,10 @@
 
 판마다 무엇이 바뀌었는지 적은 기록입니다. 받는 곳: [Releases](https://github.com/rlawhddja1231-hash/sound-ear/releases) — Claude Code는 `/plugin` 업데이트, claude.ai는 새 `sound-ear.zip`을 다시 올리면 됩니다.
 
+## v1.8.1 — 2026-10-26 · 출처 검사
+- **`origin` 명령 / `full`의 `0_출처`**: 꼬리표(ffprobe 전부), C2PA 출처 서명(JUMBF), 파일 안에 남은 만든 곳 이름(수노·우디오·Mureka·Riffusion·Stable Audio·ElevenLabs·MusicGen·브이신스·보컬로이드), 파일 이름의 수노식 ID를 봐서 "출처 확인됨 / 흔적은 있음 / 흔적 없음(=모름)"으로 말함. 종합보고서 한눈에 칸에 한 줄 추가.
+- 소리만으로 "AI가 만든 곡인가"를 맞히는 검사는 **넣지 않음**: 수노 공개 곡 4개와 사람 곡 3개의 평균 스펙트럼이 완전히 겹쳤고, 학습 판별기는 사람 곡을 AI라 할 위험과 수노 모델이 바뀔 때마다 틀릴 위험이 커서. 수노·Musixmatch가 공식 검사 API를 내면 그때 붙임.
+
 ## v1.8.0 — 2026-10-26 · 가사 대조, HTML 보고서, 진행 표시, 긴 파일
 - **가사 대조** (`lyrics` 명령, `full --lyrics 가사.txt`): 내가 쓴 가사와 받아쓴 것을 자모 단위로 맞춰 **발음이 뭉개진 글자**를 【】로 표시, 줄마다 일치율과 시각, 틀린 줄은 소리 조각(`가사조각/`)으로. 가사에 없는데 들린 말(애드리브·지어낸 말)도 따로. 영어·일본어(pykakasi로 히라가나 비교)도 됨. 가사 앞부분을 받아쓰기 힌트로 줘 고유명사를 덜 틀림.
 - **HTML 보고서** (`보고서.html`): `full`·`check`마다 한 장. 한마디 평가, 고칠 것 표(자리마다 ▶ 소리 조각), 가사 대조, 곡 흐름, 그림이 다 들어 있고 혼자서 열림.
@@ -58,6 +62,7 @@
 <a id="english"></a>
 # English
 
+- **1.8.1** — `origin` command (also in `full`): metadata tags, C2PA manifest and generator-name scan → "confirmed / hints / unknown". No audio-only AI score (Suno vs human spectra overlapped; classifiers would misfire).
 - **1.8.0** — `lyrics` command and `full --lyrics`: align written lyrics with the transcript (Korean jamo level, Japanese via kana) and flag garbled syllables with snippets; self-contained `보고서.html` with embedded pictures and ▶ snippets; step progress with time remaining (`진행.txt`); files over 20 min processed in 10-minute pieces and merged (`--no-split` to disable); verified on librosa 1.0.
 - **1.7.0** — Stems and vocal-only files transcribed in pause-split ≤25 s pieces (Japanese synth vocal 1 → 37 lines); language detected from the densest singing; `describe` ~1.8× faster; vocal-only files detected automatically; chorus naming fixed for ballads; grouped report rows.
 - **1.6.0** — `setup` command; quick `full` by default, `--deep` for separation and vocal pitch; one-line verdict; example report; fixes for missed dropouts, note-end pitch glitches, hi-hat sibilance, separated-vocal clicks, "(♪~♪)" output.

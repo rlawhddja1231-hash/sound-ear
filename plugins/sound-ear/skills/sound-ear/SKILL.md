@@ -106,6 +106,14 @@ How it works: both texts are stripped of spaces and punctuation, Korean syllable
 
 How to talk about it: the transcription itself makes mistakes, so **a marked syllable is a place to listen, not a verdict**. Tell the user: if the same syllable is heard correctly elsewhere in the song, the problem is probably that spot (phoneme length, consonant strength, note too short, wrong phoneme entered); if a sound is wrong everywhere (ㅅ heard as ㅆ, dropped ㄹ batchim, 君 read as くん), it is the model's habit. Overall match under ~45 % means the lyrics file does not belong to this audio, the language is wrong, or the backing is drowning the voice — rerun with `--deep` or a vocal-only export. Use `--lang` when auto-detect picks the wrong language.
 
+## 2d. Where did this file come from? (출처 검사)
+
+```bash
+python3 "$L" origin song.mp3 --out song_origin     # also runs inside `full` → 0_출처/출처.md and one line in the summary
+```
+
+Reads every metadata tag (ffprobe), scans the file bytes for a C2PA provenance manifest (JUMBF) and for generator names (Suno, Udio, Mureka, Riffusion, Stable Audio, ElevenLabs, MusicGen, Synthesizer V, VOCALOID…), and checks the file name for a Suno/Udio-style UUID. Verdicts: **출처 확인됨** (a tag, URL or C2PA signature names the maker — reliable), **흔적은 있지만 확실하진 않음** (prompt-like comment, maker name somewhere in the bytes, UUID file name — go and check: open `suno.com/song/<id>` in the browser, or Google one distinctive transcribed lyric line in quotes), **흔적 없음** (tags stripped or never written — say "unknown", never "human-made"). Tags and signatures are easy to strip, so absence proves nothing. There is deliberately **no audio-only "is this AI?" score**: on 2026-10-26 the long-term spectra of 4 public Suno songs and 3 human recordings overlapped completely (see references/log.md), and a trained classifier would mislabel human songs and break with every model update. If the user asks for one, explain that and offer the origin check plus the browser look-up instead.
+
 ## 3. What each finding means and how to fix it
 
 Menu names differ between vocal synths and versions; treat these as general directions.
