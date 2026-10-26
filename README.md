@@ -53,7 +53,7 @@ Claude는 귀가 없습니다. **sound-ear**는 노래·보컬·효과음·영�
 
 - "이 노래 들어 보고 이상한 데 찾아 줘"
 - "보컬만 뽑은 거야. 음정이랑 음 튀는 데 봐 줘"
-- "고친 판이야. 전이랑 비교해 줘"
+- "고친 판이야. 전이랑 비교해 줘" ← 없어진 흠·새로 생긴 흠·그대로인 흠을 표로 (v1.8.2)
 - "이 노래 어떤 노래인지 설명해 줘" / "가사 받아 적어 줘"
 - "이게 내가 쓴 가사야(txt). 발음 뭉개진 데 찾아 줘" ← 가사 대조
 
@@ -77,7 +77,7 @@ Claude는 귀가 없습니다. **sound-ear**는 노래·보컬·효과음·영�
 - mp3·유튜브 녹음처럼 손실 압축된 파일에서는 클리핑을 참고로만 봅니다
 
 ## 필요한 것
-Python 3, ffmpeg, 그리고 `librosa soundfile pyloudnorm matplotlib koreanize-matplotlib scipy` (Claude가 알아서 설치합니다). 가사 받아쓰기는 `pywhispercpp`와 모델 파일이 더 필요합니다.
+Python 3과 `librosa soundfile pyloudnorm matplotlib koreanize-matplotlib scipy` (Claude가 알아서 설치합니다). **ffmpeg가 없으면 `setup`이 운영체제에 맞게 받아 둡니다**(윈도우 포함) — 따로 깔지 않아도 됩니다. 가사 받아쓰기는 `pywhispercpp`와 모델 파일이 더 필요합니다.
 
 ## 직접 시험해 보기
 ```
@@ -120,7 +120,7 @@ For each finding it makes a close-up picture and a short audio snippet, and it c
 ```
 **Install (claude.ai):** download `sound-ear.zip` from Releases and upload it under Customize → Skills → Upload skill (code execution must be enabled).
 
-**Setup:** say "set up sound-ear" once. Claude runs `setup`, which installs packages and fetches the models it can reach; for any it cannot download it prints the URL, and you can attach the file and run setup again (split .part1/.part2 files are joined automatically).
+**Setup:** say "set up sound-ear" once (ffmpeg is downloaded automatically if missing, Windows included). Claude runs `setup`, which installs packages and fetches the models it can reach; for any it cannot download it prints the URL, and you can attach the file and run setup again (split .part1/.part2 files are joined automatically).
 
 **Usage:** attach an audio file and ask "listen to this and find problems". Add `--lyrics lyrics.txt` to `full` (or run `lyrics song.wav lyrics.txt`) to compare written lyrics with what was sung. Claude runs `full` — a quick check by default (3–4 minutes for a 4-minute song) — and gives you a one-page report that starts with a one-line verdict. Ask for a detailed listen to run `--deep` (vocal separation, larger lyrics model, vocal pitch check). For best pitch results, give a vocal-only export plus the full mix.
 

@@ -4,6 +4,10 @@
 
 판마다 무엇이 바뀌었는지 적은 기록입니다. 받는 곳: [Releases](https://github.com/rlawhddja1231-hash/sound-ear/releases) — Claude Code는 `/plugin` 업데이트, claude.ai는 새 `sound-ear.zip`을 다시 올리면 됩니다.
 
+## v1.8.2 — 2026-10-26 · 윈도우 자동 준비, 고친 뒤 비교표
+- **ffmpeg 자동 준비**: ffmpeg·ffprobe가 없으면 `setup`이 운영체제에 맞는 정적 빌드(윈도우·리눅스는 깃허브 BtbN, 맥은 evermeet)를 `~/.cache/sound-ear/ffmpeg/`에 받아 두고, 이후 모든 명령이 알아서 씀. 못 받으면 주소와 둘 폴더를 알려 줌. (윈도우에서 "apt/brew로 깔아라"에 막히던 것)
+- **`compare` 비교표**: 앞판·새판을 각각 검사해(결과 재사용) **없어진 흠 / 새로 생긴 흠 / 그대로인 흠**을 표로, 맨 위에 한마디("좋아짐 👍 — 꼭 고칠 것 3 → 0"). 새판이 앞뒤로 밀렸어도(±30초) 시각을 맞춰 비교. 숫자(클리핑·딸깍·음 튐·튜닝·음역) 나란히. `compare.json`도 남김.
+
 ## v1.8.1 — 2026-10-26 · 출처 검사
 - **`origin` 명령 / `full`의 `0_출처`**: 꼬리표(ffprobe 전부), C2PA 출처 서명(JUMBF), 파일 안에 남은 만든 곳 이름(수노·우디오·Mureka·Riffusion·Stable Audio·ElevenLabs·MusicGen·브이신스·보컬로이드), 파일 이름의 수노식 ID를 봐서 "출처 확인됨 / 흔적은 있음 / 흔적 없음(=모름)"으로 말함. 종합보고서 한눈에 칸에 한 줄 추가.
 - 소리만으로 "AI가 만든 곡인가"를 맞히는 검사는 **넣지 않음**: 수노 공개 곡 4개와 사람 곡 3개의 평균 스펙트럼이 완전히 겹쳤고, 학습 판별기는 사람 곡을 AI라 할 위험과 수노 모델이 바뀔 때마다 틀릴 위험이 커서. 수노·Musixmatch가 공식 검사 API를 내면 그때 붙임.
@@ -62,6 +66,7 @@
 <a id="english"></a>
 # English
 
+- **1.8.2** — `setup` downloads a static ffmpeg when missing (Windows/Linux/macOS); `compare` now diffs the findings of both versions (fixed / new / unchanged, with time alignment) and gives a verdict.
 - **1.8.1** — `origin` command (also in `full`): metadata tags, C2PA manifest and generator-name scan → "confirmed / hints / unknown". No audio-only AI score (Suno vs human spectra overlapped; classifiers would misfire).
 - **1.8.0** — `lyrics` command and `full --lyrics`: align written lyrics with the transcript (Korean jamo level, Japanese via kana) and flag garbled syllables with snippets; self-contained `보고서.html` with embedded pictures and ▶ snippets; step progress with time remaining (`진행.txt`); files over 20 min processed in 10-minute pieces and merged (`--no-split` to disable); verified on librosa 1.0.
 - **1.7.0** — Stems and vocal-only files transcribed in pause-split ≤25 s pieces (Japanese synth vocal 1 → 37 lines); language detected from the densest singing; `describe` ~1.8× faster; vocal-only files detected automatically; chorus naming fixed for ballads; grouped report rows.

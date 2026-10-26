@@ -7,7 +7,7 @@
       "name": "sound-ear",
       "source": "./plugins/sound-ear",
       "description": "Lets Claude 'hear' audio files and find problems, transcribe lyrics, and describe song structure, drums, mood and hooks.",
-      "version": "1.8.1",
+      "version": "1.8.2",
       "category": "productivity",
       "tags": ["audio", "music", "vocal"]
     }

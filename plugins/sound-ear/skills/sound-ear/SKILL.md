@@ -20,7 +20,7 @@ pip install -q librosa soundfile pyloudnorm matplotlib koreanize-matplotlib scip
 python3 "$L" setup          # checks/installs everything, fetches reachable models; --check = status only
 ```
 
-`setup` installs the optional packages, gathers model files the user attached (from the working folder, `/mnt/user-data/uploads`, `~/Downloads`, or `--from DIR`; `X.bin.part1`+`.part2` are joined, an `essentia*.tar` is unpacked), downloads what it can reach, and prints a ✅/❌ table plus the URL of every model it could not fetch. If something is missing, show the user that list in plain words and ask them to attach the file, then run `setup` again. Add `--accurate` to also fetch the 539 MB medium lyrics model. ffmpeg must already be installed. Manual details follow.
+`setup` installs the optional packages, gathers model files the user attached (from the working folder, `/mnt/user-data/uploads`, `~/Downloads`, or `--from DIR`; `X.bin.part1`+`.part2` are joined, an `essentia*.tar` is unpacked), downloads what it can reach, and prints a ✅/❌ table plus the URL of every model it could not fetch. If something is missing, show the user that list in plain words and ask them to attach the file, then run `setup` again. Add `--accurate` to also fetch the 539 MB medium lyrics model. If ffmpeg/ffprobe are missing, `setup` downloads a static build for the OS (Windows: BtbN zip from GitHub, Linux: BtbN tar.xz, macOS: evermeet) into `~/.cache/sound-ear/ffmpeg/` and every later run uses it automatically; if that download is blocked, it prints the URL and the folder to drop `ffmpeg`/`ffprobe` into. Manual details follow.
 
 **Lyrics / speech (optional):** `pip install pywhispercpp` and a whisper.cpp model file `ggml-*.bin` from https://huggingface.co/ggerganov/whisper.cpp (`ggml-small-q5_1.bin`, 190 MB, fast; or `ggml-medium-q5_0.bin`, 539 MB, much better for Korean sung lyrics, ~1.6× real time on 2 cores — the largest model found is used unless `--fast`). Put it in `~/.cache/sound-ear/` or pass `--model`, or set `SOUND_EAR_MODEL`. If the sandbox cannot reach Hugging Face, ask the user to download the file and attach it. Without a model, `describe` still works but guesses where the singing is from loudness only. With `--lang auto` the language is detected from the three densest 30-second stretches of singing (whisper.cpp alone looks only at the first 30 s, so long intros gave the wrong language). Vocal stems and vocal-only files are transcribed in pieces of up to 25 s split at pauses — fed whole, a stem often came back as one made-up line; full mixes are still transcribed whole, which worked better there.
 
@@ -64,7 +64,7 @@ Default `full` is **quick**: check the mix → describe with the small lyrics mo
    ```bash
    python3 "$L" compare old.wav new.wav --out compare
    ```
-   Say "before: N issues, now: M issues".
+   `compare` runs `check` on both versions (reusing results), lines the two up even when the new version starts earlier or later (1-second loudness curves, up to ±30 s), and writes `비교.md` with a one-line verdict and three lists: **없어진 흠** (fixed), **새로 생긴 흠** (regressions — read these first), **그대로인 흠** (still there, with old → new timestamps), plus the numbers side by side. Lead with the verdict and the regressions.
 
 ## 2b. Hearing the song as a listener
 

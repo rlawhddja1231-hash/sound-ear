@@ -1,6 +1,6 @@
 {
   "name": "sound-ear",
-  "version": "1.8.1",
+  "version": "1.8.2",
   "description": "Lets Claude 'hear' audio: finds clicks, clipping, pitch glitches and more, transcribes lyrics, and describes song structure, instruments, genre, mood and hooks. Built for checking vocal-synth songs.",
   "author": { "name": "rlawhddja1231-hash", "url": "https://github.com/rlawhddja1231-hash" },
   "homepage": "https://github.com/rlawhddja1231-hash/sound-ear",

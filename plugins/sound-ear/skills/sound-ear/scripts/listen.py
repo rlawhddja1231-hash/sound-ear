@@ -32,6 +32,89 @@ import numpy as np
 
 warnings.filterwarnings("ignore")
 
+# ---------------------------------------------------------------- ffmpeg 찾기·자동 준비 [v1.8.2]
+FF_DIR = os.path.join(os.path.expanduser("~"), ".cache", "sound-ear", "ffmpeg")
+FF_URLS = {  # 윈도우·리눅스는 BtbN 정적 빌드(깃허브), 맥은 evermeet
+    "win": "https://github.com/BtbN/FFmpeg-Builds/releases/latest/download/ffmpeg-master-latest-win64-gpl.zip",
+    "linux-x86_64": "https://github.com/BtbN/FFmpeg-Builds/releases/latest/download/ffmpeg-master-latest-linux64-gpl.tar.xz",
+    "linux-aarch64": "https://github.com/BtbN/FFmpeg-Builds/releases/latest/download/ffmpeg-master-latest-linuxarm64-gpl.tar.xz",
+    "mac-ffmpeg": "https://evermeet.cx/ffmpeg/getrelease/zip",
+    "mac-ffprobe": "https://evermeet.cx/ffmpeg/getrelease/ffprobe/zip",
+}
+
+
+def _use_local_ffmpeg():
+    """시스템에 ffmpeg가 없으면 ~/.cache/sound-ear/ffmpeg 에 받아 둔 것을 PATH 앞에 넣는다."""
+    import shutil
+    if shutil.which("ffmpeg") and shutil.which("ffprobe"):
+        return True
+    if os.path.isdir(FF_DIR):
+        os.environ["PATH"] = FF_DIR + os.pathsep + os.environ.get("PATH", "")
+    return bool(shutil.which("ffmpeg") and shutil.which("ffprobe"))
+
+
+def ensure_ffmpeg(download=True):
+    """ffmpeg·ffprobe를 쓸 수 있게 한다. 없으면 운영체제에 맞는 정적 빌드를 받아 ~/.cache/sound-ear/ffmpeg 에 푼다.
+    돌려주는 것: (됨, 설명)"""
+    import platform
+    import shutil
+    import stat
+    import tarfile
+    import zipfile
+    if _use_local_ffmpeg():
+        return True, "있음 (" + (shutil.which("ffmpeg") or "") + ")"
+    if not download:
+        return False, "없음"
+    os.makedirs(FF_DIR, exist_ok=True)
+    sysname = platform.system().lower()
+    arch = platform.machine().lower()
+    try:
+        if sysname.startswith("win"):
+            z = os.path.join(FF_DIR, "ffmpeg.zip")
+            if not _download(FF_URLS["win"], z, timeout=1200):
+                return False, "내려받기 실패 — 인터넷이 막혔으면 " + FF_URLS["win"] + " 를 받아 bin 안의 ffmpeg.exe·ffprobe.exe 를 " + FF_DIR + " 에 두세요"
+            with zipfile.ZipFile(z) as zf:
+                for m in zf.namelist():
+                    base = os.path.basename(m)
+                    if base in ("ffmpeg.exe", "ffprobe.exe"):
+                        with zf.open(m) as src, open(os.path.join(FF_DIR, base), "wb") as dst:
+                            shutil.copyfileobj(src, dst)
+            os.remove(z)
+        elif sysname == "darwin":
+            for name in ("ffmpeg", "ffprobe"):
+                z = os.path.join(FF_DIR, name + ".zip")
+                if not _download(FF_URLS["mac-" + name], z, timeout=1200):
+                    return False, "내려받기 실패 — brew install ffmpeg 를 하거나 evermeet.cx/ffmpeg 에서 받아 " + FF_DIR + " 에 두세요"
+                with zipfile.ZipFile(z) as zf:
+                    for m in zf.namelist():
+                        if os.path.basename(m) == name:
+                            with zf.open(m) as src, open(os.path.join(FF_DIR, name), "wb") as dst:
+                                shutil.copyfileobj(src, dst)
+                os.remove(z)
+        else:
+            key = "linux-aarch64" if ("arm" in arch or "aarch64" in arch) else "linux-x86_64"
+            t = os.path.join(FF_DIR, "ffmpeg.tar.xz")
+            if not _download(FF_URLS[key], t, timeout=1200):
+                return False, "내려받기 실패 — sudo apt install ffmpeg 를 하거나 " + FF_URLS[key] + " 를 받아 bin 안의 ffmpeg·ffprobe 를 " + FF_DIR + " 에 두세요"
+            with tarfile.open(t) as tf:
+                for m in tf.getmembers():
+                    base = os.path.basename(m.name)
+                    if m.isfile() and base in ("ffmpeg", "ffprobe"):
+                        with tf.extractfile(m) as src, open(os.path.join(FF_DIR, base), "wb") as dst:
+                            shutil.copyfileobj(src, dst)
+            os.remove(t)
+        for name in ("ffmpeg", "ffprobe"):
+            pth = os.path.join(FF_DIR, name)
+            if os.path.exists(pth):
+                os.chmod(pth, os.stat(pth).st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    except Exception as e:  # noqa
+        return False, f"풀다가 실패: {e}"
+    ok = _use_local_ffmpeg()
+    return ok, ("받아서 준비함 → " + FF_DIR) if ok else "받았는데 실행 파일을 못 찾음: " + FF_DIR
+
+
+_use_local_ffmpeg()
+
 NOTE_EN = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
 NOTE_KO = ["도", "도#", "레", "레#", "미", "파", "파#", "솔", "솔#", "라", "라#", "시"]
 MAJOR_KO = ["다", "올림다", "라", "내림마", "마", "바", "올림바", "사", "내림가", "가", "내림나", "나"]
@@ -1568,14 +1651,94 @@ def summarize(path):
     return dict(dur=len(st) / sr, peak=float(db(np.abs(st).max())), lufs=float(lufs), sec_db=db(rms), y=y)
 
 
+def _check_results(path, mode, out):
+    """check 결과(result.json)를 읽는다. 없거나 오래됐으면 새로 돌린다."""
+    from argparse import Namespace
+    rj = os.path.join(out, "result.json")
+    if not (os.path.isfile(rj) and os.path.getmtime(rj) >= os.path.getmtime(path)):
+        _check_one(Namespace(file=path, mode=mode, out=out, max_zoom=6, key_from=None), quiet=True)
+    return json.load(open(rj, encoding="utf-8"))
+
+
+def _estimate_offset(a_db, b_db, max_lag=30):
+    """새판이 앞판보다 몇 초 밀렸는지(앞을 잘랐거나 붙였을 때) 1초 크기 곡선을 맞춰 본다. 양수면 새판이 늦게 시작."""
+    n = min(len(a_db), len(b_db))
+    if n < 10:
+        return 0.0
+    x = np.asarray(a_db[:n], float)
+    y = np.asarray(b_db[:n], float)
+    x = x - x.mean()
+    y = y - y.mean()
+    best, lag = -1e9, 0
+    for L in range(-max_lag, max_lag + 1):
+        if L >= 0:
+            s = float(np.dot(x[: n - L], y[L:])) if n - L > 5 else -1e9
+        else:
+            s = float(np.dot(x[-L:], y[: n + L])) if n + L > 5 else -1e9
+        if s > best:
+            best, lag = s, L
+    return float(lag)
+
+
 def cmd_compare(args):
+    """두 판 비교: 크기·라우드니스뿐 아니라 흠 목록까지 맞춰 '없어진 흠 / 새로 생긴 흠 / 그대로인 흠'을 표로. [v1.8.2]"""
     a, b = summarize(args.a), summarize(args.b)
     out = args.out or "소리비교"
     os.makedirs(out, exist_ok=True)
-    lines = [f"# 두 판 비교", "", f"| 항목 | 앞판 ({os.path.basename(args.a)}) | 새판 ({os.path.basename(args.b)}) |", "|---|---|---|"]
+    lines = [f"# 두 판 비교", "", "VERDICT", "", f"| 항목 | 앞판 ({os.path.basename(args.a)}) | 새판 ({os.path.basename(args.b)}) |", "|---|---|---|"]
     lines.append(f"| 길이 | {fmt_t(a['dur'])} | {fmt_t(b['dur'])} |")
     lines.append(f"| 최고 크기 | {a['peak']:.1f} dBFS | {b['peak']:.1f} dBFS |")
     lines.append(f"| 라우드니스 | {a['lufs']:.1f} LUFS | {b['lufs']:.1f} LUFS |")
+    # 흠 목록 맞추기
+    mode = detect_mode(args.b, getattr(args, "mode", "auto"))
+    off = _estimate_offset(a["sec_db"], b["sec_db"]) if not getattr(args, "no_align", False) else 0.0
+    ra = _check_results(args.a, mode, os.path.join(out, "앞판검사"))
+    rb = _check_results(args.b, mode, os.path.join(out, "새판검사"))
+    pa = [p for p in ra.get("problems", []) if p["level"] != LEVEL_INFO]
+    pb = [p for p in rb.get("problems", []) if p["level"] != LEVEL_INFO]
+    whole = lambda p: p.get("end") is None and p["t"] == 0
+    used = set()
+    same, gone, new = [], [], []
+    for p in pa:
+        hit = None
+        for j, q in enumerate(pb):
+            if j in used or q["kind"] != p["kind"]:
+                continue
+            if whole(p) and whole(q):
+                hit = j
+            elif not whole(p) and not whole(q) and abs((q["t"] - off) - p["t"]) <= 0.6:
+                hit = j
+            if hit is not None:
+                break
+        if hit is None:
+            gone.append(p)
+        else:
+            used.add(hit)
+            same.append((p, pb[hit]))
+    new = [q for j, q in enumerate(pb) if j not in used]
+    n_must_a = sum(1 for p in pa if p["level"] == LEVEL_MUST)
+    n_must_b = sum(1 for p in pb if p["level"] == LEVEL_MUST)
+    if n_must_b == 0 and not new:
+        verdict = f"좋아짐 👍 — 꼭 고칠 것 {n_must_a}곳 → 0곳, 새로 생긴 흠 없음"
+    elif len(gone) > len(new):
+        verdict = f"좋아짐 — 없어진 흠 {len(gone)}곳, 새로 생긴 흠 {len(new)}곳 (꼭 고칠 것 {n_must_a} → {n_must_b})"
+    elif len(gone) == len(new) == 0:
+        verdict = "흠 목록은 그대로 — 소리 크기만 달라졌는지 아래를 보세요"
+    else:
+        verdict = f"주의 ⚠️ — 새로 생긴 흠 {len(new)}곳이 없어진 흠 {len(gone)}곳보다 많음 (꼭 고칠 것 {n_must_a} → {n_must_b})"
+    lines[lines.index("VERDICT")] = f"> **한마디: {verdict}**" + (f"\n>\n> 새판이 앞판보다 {off:+.0f}초 밀려 있어 시각을 맞춰 비교했습니다." if abs(off) >= 1 else "")
+    mk = lambda p: "🔴" if p["level"] == LEVEL_MUST else "🟠"
+    tv = lambda p: "전체" if whole(p) else fmt_t(p["t"])
+    lines += ["", f"## 없어진 흠 ({len(gone)}) — 앞판에 있었는데 새판엔 없음", ""]
+    lines += [f"- {mk(p)} {tv(p)} {p['kind']}" for p in gone] or ["- 없음"]
+    lines += ["", f"## 새로 생긴 흠 ({len(new)}) — 새판에서 처음 보임", ""]
+    lines += [f"- {mk(q)} {tv(q)} {q['kind']} — {q['msg']}" for q in new] or ["- 없음"]
+    lines += ["", f"## 그대로인 흠 ({len(same)})", ""]
+    lines += [f"- {mk(q)} {tv(p)} → {tv(q)} {p['kind']}" for p, q in same] or ["- 없음"]
+    sa, sb = ra.get("stats", {}), rb.get("stats", {})
+    rows = [(k, sa.get(k), sb.get(k)) for k in ("클리핑 횟수", "딸깍 소리", "음 튐", "큰 숨소리", "센 ㅅ·ㅊ 소리", "전체 튜닝 치우침(센트)", "음역", "조(키, 추정)") if k in sa or k in sb]
+    if rows:
+        lines += ["", "## 숫자로 보면", "", "| 항목 | 앞판 | 새판 |", "|---|---|---|"] + [f"| {k} | {x} | {y} |" for k, x, y in rows]
     n = min(len(a["sec_db"]), len(b["sec_db"]))
     diff = b["sec_db"][:n] - a["sec_db"][:n]
     big = [(i, d) for i, d in enumerate(diff) if abs(d) > 3]
@@ -1592,11 +1755,13 @@ def cmd_compare(args):
     fig.tight_layout()
     fig.savefig(ip, dpi=80)
     plt.close(fig)
-    lines += ["", f"그림: 크기비교.png"]
+    lines += ["", f"그림: 크기비교.png / 각 판의 검사: `앞판검사/보고서.md`, `새판검사/보고서.md`"]
     rp = os.path.join(out, "비교.md")
     open(rp, "w", encoding="utf-8").write("\n".join(lines))
+    json.dump(dict(verdict=verdict, offset=off, gone=gone, new=new, same=[dict(before=p, after=q) for p, q in same]),
+              open(os.path.join(out, "compare.json"), "w", encoding="utf-8"), ensure_ascii=False, indent=1, default=float)
     print(f"[완료] {rp}")
-    print("\n".join(lines[:8]))
+    print("\n".join(lines[:12]))
 
 
 # ---------------------------------------------------------------- 받아쓰기 (말·가사)
@@ -2938,7 +3103,8 @@ def cmd_setup(args):
         print(f"  {'✅' if ok else '❌'} {name}" + (f" — {note}" if note else ""))
     print("1) 프로그램")
     import shutil
-    row("ffmpeg", bool(shutil.which("ffmpeg") and shutil.which("ffprobe")), "" if shutil.which("ffmpeg") else "apt/brew로 ffmpeg를 깔아야 합니다")
+    ok_ff, note_ff = ensure_ffmpeg(download=not args.check)
+    row("ffmpeg", ok_ff, note_ff)
     import importlib
     for mod, pipname in PKGS:
         try:
@@ -3088,9 +3254,11 @@ def main():
     se.add_argument("--accurate", action="store_true", help="한국어 가사가 더 정확한 큰 받아쓰기 모델(539MB)도 받기")
     se.add_argument("--from", dest="from_dir", action="append", help="모델 파일을 둔 폴더(여러 번 가능)")
     se.set_defaults(fn=cmd_setup)
-    m = sub.add_parser("compare")
+    m = sub.add_parser("compare", help="두 판 비교: 없어진 흠·새로 생긴 흠·그대로인 흠 표 + 크기 비교")
     m.add_argument("a")
     m.add_argument("b")
+    m.add_argument("--mode", default="auto", choices=["auto", "vocal", "mix"])
+    m.add_argument("--no-align", action="store_true", help="두 판의 시각 어긋남을 맞추지 않음")
     m.add_argument("--out")
     m.set_defaults(fn=cmd_compare)
     args = ap.parse_args()
