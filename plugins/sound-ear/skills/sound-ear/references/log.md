@@ -2,6 +2,12 @@
 
 Newest first. Record date, file type, what was found, false positives, misses, and threshold changes.
 
+## 2026-10-26 — Suno "watermark" probe (no detectable signature)
+- Suno announced (2026-08-06) an inaudible watermark + Musixmatch fingerprinting, technique undisclosed. Checked whether a long-term-average-spectrum (LTAS) signature exists: 4 public Suno songs captured in Chrome via WebAudio AnalyserNode (fft 8192, 48 kHz, 35 s each) vs 3 human recordings (archive.org mp3, Wikimedia ogg).
+- Suno: hard cutoff at 20.1 kHz (AAC), no narrow non-harmonic peaks shared across songs (one song had 11.2 k / 14.0 k peaks, others none). Humans: cutoff 16–20 k, ogg files even show more high-band residue. Band levels overlap completely.
+- Conclusion: nothing in the average spectrum separates Suno from human mixes; a watermark, if present, is below this method's floor or spread-spectrum/neural. An "AI-made?" check would need a trained classifier on hundreds of labelled songs, and would break with each Suno model update. Not added. Revisit only if Suno/Musixmatch publish a detector API.
+- Capture notes: Suno plays `cloudfront /1/clip/ID.m4a` through MediaSource (fragmented mp4 — decodeAudioData fails), so only live capture through createMediaElementSource on the blob element works; the analysis code is in suno.com localStorage._sec (window._run).
+
 ## 2026-10-26 — lyrics comparison, HTML report, progress, long files — v1.8.0
 - `lyrics` / `full --lyrics`: written lyrics vs transcript aligned with difflib on normalized character streams (Korean → jamo, Japanese → hiragana via optional pykakasi, Latin → lowercase, punctuation and spaces dropped). First the score was jamo-level, which let "울지 말라고" with two wrong syllables pass at 89 %; switched to syllable-level: any syllable with a differing jamo is marked, a line with one marked syllable is 🟠, under 60 % is 🔴. Tested only with simulated transcripts here (Hugging Face is blocked in this sandbox, so no whisper model) — the alignment is right; real-song behaviour still to be checked on the PC.
 - Japanese: kakasi reads 君 as くん while the singer says きみ → one false mark per such kanji. Documented as model habit.
