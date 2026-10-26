@@ -20,8 +20,11 @@ Claude는 귀가 없습니다. **sound-ear**는 노래·보컬·효과음·영�
 | **곡 설명** | 전주·절·후렴·간주 같은 구성, 반복되는 부분, 드럼·저음, 세기 변화, 분위기, 반복되는 가사(훅) |
 | **보컬 분리** | 완성곡에서 목소리와 반주를 갈라 가사·음정을 더 정확하게 (UVR 모델) |
 | **악기·장르·분위기 (음악 AI)** | 피아노·기타·신스·현악기 등 40가지 악기, 장르 400가지, 분위기 56가지를 구간별로 (Essentia) |
+| **가사 대조 (v1.8)** | 내가 쓴 가사 txt를 주면 들린 것과 글자(자모) 단위로 맞춰 **발음이 뭉개진 줄·글자**를 찾고 그 자리를 잘라 둠 |
 
 그리고 문제마다 **확대 그림**과 **그 부분만 자른 소리 조각**을 만들어서 바로 들어 볼 수 있게 합니다. 고친 뒤에는 **앞판·새판 비교**도 합니다.
+
+**v1.8부터:** 결과가 **`보고서.html` 한 장**으로도 나옵니다(그림과 소리 조각이 안에 들어 있어 브라우저에서 ▶만 누르면 그 자리를 들음). 긴 작업은 **"[2/4] 흠 찾기 — 남은 시간 약 1분"** 식으로 진행을 보여 주고, **1시간짜리 파일**도 10분씩 나눠 검사해 하나로 합칩니다.
 
 ![전체 보기 예시](docs/example-overview.png)
 ![음이 순간 튄 곳 확대 — 연두 점 하나가 위로 튀어 있음](docs/example-glitch.png)
@@ -51,6 +54,7 @@ Claude는 귀가 없습니다. **sound-ear**는 노래·보컬·효과음·영�
 - "보컬만 뽑은 거야. 음정이랑 음 튀는 데 봐 줘"
 - "고친 판이야. 전이랑 비교해 줘"
 - "이 노래 어떤 노래인지 설명해 줘" / "가사 받아 적어 줘"
+- "이게 내가 쓴 가사야(txt). 발음 뭉개진 데 찾아 줘" ← 가사 대조
 
 **예시 보고서:** [docs/example-report/종합보고서.md](docs/example-report/종합보고서.md) — 일부러 딸깍 소리와 뚝 끊김을 넣은 40초짜리 합성곡([예시곡.mp3](docs/example-report/예시곡.mp3))을 빠른 검사로 돌린 결과입니다(15초쯤 걸림, 둘 다 찾음).
 
@@ -61,6 +65,8 @@ Claude는 귀가 없습니다. **sound-ear**는 노래·보컬·효과음·영�
 **보컬 분리 모델:** [Kim_Vocal_2.onnx](https://github.com/TRvlvr/model_repo/releases/download/all_public_uvr_models/Kim_Vocal_2.onnx)(67MB)를 받아 Claude에게 주세요.
 
 **악기·장르·분위기 모델:** [Essentia 모델](https://essentia.upf.edu/models/)에서 파일 7개(약 26MB, 목록은 SKILL.md)를 받아 Claude에게 주세요. 이 모델은 **비상업용만 무료(CC BY-NC-ND)**라 이 저장소에는 넣지 않았습니다.
+
+**일본어 가사 대조**를 쓰려면 `pip install pykakasi`(한자·가타카나를 히라가나로 바꿔 소리로 견줌). `setup`이 같이 깝니다.
 
 **팁:** 보컬 합성 노래는 **보컬만 따로 내보낸 wav + 완성곡 wav**를 같이 주면 가장 정확합니다. 반주가 섞이면 음정 검사가 틀립니다.
 
@@ -100,6 +106,8 @@ python3 plugins/sound-ear/skills/sound-ear/tests/mixtest.py
 - **Describe:** sections (intro, verse, chorus, breaks), repeats, drums and bass, loudness changes, mood, repeated lyric hooks
 - **Vocal separation:** split a full mix into vocals and backing (UVR MDX-Net, optional model download) for better lyrics and pitch checks on finished songs
 - **Instruments, genre, mood (music AI):** 40 instruments, 400 genres, 56 moods per section with optional Essentia models (non-commercial license; download them yourself)
+- **Lyrics comparison (v1.8):** give it the lyrics you typed into the synth and it aligns them with what was heard (Korean at jamo level, Japanese via kana) to flag garbled syllables, with a snippet per flagged line
+- **Also new in 1.8:** a self-contained `보고서.html` report with embedded pictures and ▶ audio snippets, step-by-step progress with time remaining (`진행.txt`), and hour-long files handled in 10-minute pieces
 
 For each finding it makes a close-up picture and a short audio snippet, and it can compare two versions after you fix things. Built for checking vocal-synth songs (Synthesizer V, VOCALOID, UTAU, CeVIO) before release. Report labels are Korean; Claude answers in your language.
 
@@ -112,7 +120,7 @@ For each finding it makes a close-up picture and a short audio snippet, and it c
 
 **Setup:** say "set up sound-ear" once. Claude runs `setup`, which installs packages and fetches the models it can reach; for any it cannot download it prints the URL, and you can attach the file and run setup again (split .part1/.part2 files are joined automatically).
 
-**Usage:** attach an audio file and ask "listen to this and find problems". Claude runs `full` — a quick check by default (3–4 minutes for a 4-minute song) — and gives you a one-page report that starts with a one-line verdict. Ask for a detailed listen to run `--deep` (vocal separation, larger lyrics model, vocal pitch check). For best pitch results, give a vocal-only export plus the full mix.
+**Usage:** attach an audio file and ask "listen to this and find problems". Add `--lyrics lyrics.txt` to `full` (or run `lyrics song.wav lyrics.txt`) to compare written lyrics with what was sung. Claude runs `full` — a quick check by default (3–4 minutes for a 4-minute song) — and gives you a one-page report that starts with a one-line verdict. Ask for a detailed listen to run `--deep` (vocal separation, larger lyrics model, vocal pitch check). For best pitch results, give a vocal-only export plus the full mix.
 
 **Example report:** [docs/example-report/종합보고서.md](docs/example-report/종합보고서.md) — a 40-second synthetic song with a planted click and dropout; both found in about 15 seconds.
 

@@ -2,6 +2,14 @@
 
 Newest first. Record date, file type, what was found, false positives, misses, and threshold changes.
 
+## 2026-10-26 — lyrics comparison, HTML report, progress, long files — v1.8.0
+- `lyrics` / `full --lyrics`: written lyrics vs transcript aligned with difflib on normalized character streams (Korean → jamo, Japanese → hiragana via optional pykakasi, Latin → lowercase, punctuation and spaces dropped). First the score was jamo-level, which let "울지 말라고" with two wrong syllables pass at 89 %; switched to syllable-level: any syllable with a differing jamo is marked, a line with one marked syllable is 🟠, under 60 % is 🔴. Tested only with simulated transcripts here (Hugging Face is blocked in this sandbox, so no whisper model) — the alignment is right; real-song behaviour still to be checked on the PC.
+- Japanese: kakasi reads 君 as くん while the singer says きみ → one false mark per such kanji. Documented as model habit.
+- `보고서.html`: images and 2.4 s mp3 snippets (80 kbps mono) are base64-embedded; a 21 s test file gave a 2.5 MB page. Snippets capped at 24, images at 20.
+- Progress: `progress_step/tick` print and overwrite `<out>/진행.txt`; whisper progress through `new_segment_callback` (falls back silently if the pywhispercpp version lacks it). Estimates: check 0.08×dur (mix) / 0.2×dur (vocal), separate 1.05×dur, words 0.5×dur (small) / 1.7×dur (medium), describe 0.17×dur.
+- Long files: >20 min → 10-minute wav pieces in `_조각/` (ffmpeg, pcm_f32le). `check` and `full` run per piece; problems shifted to absolute time; edge artefacts dropped (앞 무음/시작 잘림 except piece 1, 끝 잘림 except last, 뚝 끊김 within 0.3 s of an edge); whole-file items deduped across pieces; LUFS merged as length-weighted power mean; peak = max. Memory for a 10-min piece check ≈ 1.5 GB RSS.
+- librosa 1.0.0 is what pip installs now; selftest and mixtest still PASS.
+
 ## 2026-10-25 — Japanese stem lyrics, faster describe, vocal-only detection — v1.7.0
 - Japanese synth vocal (구마, separated stem, medium): whole-file transcription gave one made-up line ("ご視聴ありがとうございました"); splitting at pauses into ≤ 25 s pieces gave 37 real lines and was faster (317 s vs 345 s). On full mixes the same split made things worse (Korean 마법: fewer correct lines, 215 s vs 124 s), so it is used only for stems and vocal-only files.
 - Language is picked from the three loudest 30 s windows instead of the first 30 s.

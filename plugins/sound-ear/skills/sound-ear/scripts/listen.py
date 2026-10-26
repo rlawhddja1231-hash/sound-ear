@@ -9,6 +9,8 @@
   python3 listen.py full   노래.wav [--lang ko] [--out 폴더]   ← 처음엔 이것 하나면 됨 (종합보고서.md)
   python3 listen.py separate 노래.wav [--out 폴더]   (보컬.wav, 반주.wav)
   python3 listen.py words  노래.wav [--lang ko] [--model ggml-small-q5_1.bin] [--out 폴더]
+  python3 listen.py lyrics 노래.wav 가사.txt [--out 폴더]   (내가 쓴 가사와 들린 것 맞춰 보기)
+  python3 listen.py full   노래.wav --lyrics 가사.txt      (종합보고서에 가사 대조까지, 보고서.html도 같이)
 
 check   : 소리 전체를 검사해 보고서(보고서.md, result.json)와 그림을 만든다.
 cut     : 정한 시각 앞뒤를 잘라 소리 조각과 확대 그림을 만든다.
@@ -130,6 +132,459 @@ def runs(mask):
     starts = np.where(d == 1)[0]
     ends = np.where(d == -1)[0]
     return list(zip(starts, ends))
+
+
+# ---------------------------------------------------------------- 진행 표시
+# 긴 작업 중에 "지금 몇 번째 단계, 몇 % , 몇 분 남음"을 화면과 out/진행.txt 에 적는다.
+# Claude가 뒤에서 돌려 둔 작업은 진행.txt 를 읽으면 어디까지 왔는지 알 수 있다. [v1.8.0]
+_PROG = {"out": None, "t0": None, "steps": [], "i": 0, "est": 0.0, "tick_t": 0.0, "name": ""}
+
+
+def _fmt_dur(s):
+    s = max(0, int(round(s)))
+    return f"{s // 60}분 {s % 60:02d}초" if s >= 60 else f"{s}초"
+
+
+def progress_start(out, steps):
+    """steps: [(이름, 예상 초)]"""
+    import time
+    _PROG.update(out=out, t0=time.time(), steps=list(steps), i=0, est=sum(e for _, e in steps), tick_t=0.0, name="")
+    _progress_write("시작")
+
+
+def _progress_write(line):
+    import time
+    if not _PROG["out"]:
+        return
+    try:
+        el = time.time() - _PROG["t0"]
+        with open(os.path.join(_PROG["out"], "진행.txt"), "w", encoding="utf-8") as f:
+            f.write(f"{time.strftime('%H:%M:%S')} 지금까지 {_fmt_dur(el)}\n{line}\n")
+    except Exception:
+        pass
+
+
+def progress_step(name, est=None):
+    """단계 하나를 시작한다. 지금까지 걸린 시간과 남은 예상 시간을 같이 찍는다."""
+    import time
+    _PROG["i"] += 1
+    _PROG["name"] = name
+    _PROG["tick_t"] = 0.0
+    n = len(_PROG["steps"]) or 1
+    i = _PROG["i"]
+    el = time.time() - (_PROG["t0"] or time.time())
+    done_est = sum(e for _, e in _PROG["steps"][: i - 1])
+    remain = sum(e for _, e in _PROG["steps"][i - 1:]) if _PROG["steps"] else 0
+    # 실제 속도가 예상과 다르면 남은 시간도 그 비율로 늘리거나 줄인다
+    if done_est > 20 and el > 0:
+        remain *= min(4.0, max(0.25, el / done_est))
+    msg = f"[{i}/{n}] {name} — 지금까지 {_fmt_dur(el)}" + (f", 남은 시간 약 {_fmt_dur(remain)}" if remain else "")
+    print("\n=== " + msg + " ===", flush=True)
+    _progress_write(msg)
+
+
+def progress_tick(frac, label="", every=5.0):
+    """단계 안에서 몇 %인지. 같은 줄을 너무 자주 찍지 않게 every초마다만."""
+    import time
+    now = time.time()
+    if now - _PROG["tick_t"] < every and frac < 0.999:
+        return
+    _PROG["tick_t"] = now
+    i, n = _PROG["i"], len(_PROG["steps"]) or 1
+    cur_est = _PROG["steps"][i - 1][1] if _PROG["steps"] and 0 < i <= len(_PROG["steps"]) else 0
+    left = cur_est * (1 - frac) + sum(e for _, e in _PROG["steps"][i:])
+    msg = f"  {_PROG['name']} {frac:.0%}" + (f" ({label})" if label else "") + (f" — 남은 시간 약 {_fmt_dur(left)}" if left else "")
+    print(msg, flush=True)
+    _progress_write(f"[{i}/{n}] " + msg.strip())
+
+
+def progress_done():
+    import time
+    if _PROG["t0"]:
+        _progress_write(f"끝 — 모두 {_fmt_dur(time.time() - _PROG['t0'])} 걸림")
+
+
+def est_times(dur, deep=False, model_big=False):
+    """2코어 기준 대략의 예상 시간(초). [확인: 10-25 4분 곡 빠른 검사 3~4분, --deep 10분쯤]"""
+    return dict(check_mix=12 + 0.08 * dur, check_vocal=12 + 0.2 * dur, separate=10 + 1.05 * dur,
+                words=(1.7 if model_big else 0.5) * dur + 10, describe=8 + 0.17 * dur, lyrics=3, html=3)
+
+
+# ---------------------------------------------------------------- 가사 대조 (내가 쓴 가사 vs 받아쓴 것)
+def _jamo(ch):
+    """한글 한 글자를 초성·중성·종성으로 푼다. 한글이 아니면 그대로."""
+    o = ord(ch)
+    if 0xAC00 <= o <= 0xD7A3:
+        o -= 0xAC00
+        cho, jung, jong = o // 588, (o % 588) // 28, o % 28
+        CHO = "ㄱㄲㄴㄷㄸㄹㅁㅂㅃㅅㅆㅇㅈㅉㅊㅋㅌㅍㅎ"
+        JUNG = "ㅏㅐㅑㅒㅓㅔㅕㅖㅗㅘㅙㅚㅛㅜㅝㅞㅟㅠㅡㅢㅣ"
+        JONG = " ㄱㄲㄳㄴㄵㄶㄷㄹㄺㄻㄼㄽㄾㄿㅀㅁㅂㅄㅅㅆㅇㅈㅊㅋㅌㅍㅎ"
+        return CHO[cho] + JUNG[jung] + (JONG[jong].strip())
+    return ch
+
+
+_KAKASI = None
+
+
+def _ja_hira(text):
+    """일본어 한자·가타카나를 히라가나로(pykakasi가 있을 때만). 글자 수가 달라지므로 [(히라가나 글자, 원래 글자 번호)]로 돌려준다."""
+    global _KAKASI
+    if _KAKASI is None:
+        try:
+            import pykakasi
+            _KAKASI = pykakasi.kakasi()
+        except Exception:
+            _KAKASI = False
+    if not _KAKASI:
+        return None
+    out = []
+    pos = 0
+    for item in _KAKASI.convert(text):
+        orig, hira = item["orig"], item["hira"]
+        k = text.find(orig, pos)
+        k = pos if k < 0 else k
+        for ch in hira:
+            out.append((ch, k))
+        pos = k + len(orig)
+    return out
+
+
+def _norm_chars(text):
+    """비교용 글자 목록: 띄어쓰기·문장부호를 빼고, 한글은 자모로 풀고, 영어는 소문자로.
+    일본어는 pykakasi가 있으면 한자·가타카나를 히라가나로 바꿔 소리로 견준다. [(비교 글자, 원래 글자 번호)]"""
+    import unicodedata
+    out = []
+    src = list(enumerate(text))
+    if any(0x3040 <= ord(c) <= 0x30FF or 0x4E00 <= ord(c) <= 0x9FFF for c in text):
+        conv = _ja_hira(text)
+        if conv:
+            src = [(k, ch) for ch, k in conv]
+    for i, ch in src:
+        if ch.isspace() or unicodedata.category(ch)[0] in ("P", "S", "Z"):
+            continue
+        ch2 = ch.lower()
+        ch2 = unicodedata.normalize("NFKC", ch2)
+        # 일본어 가타카나는 히라가나로 (받아쓰기가 둘을 섞어 씀)
+        if 0x30A1 <= ord(ch2) <= 0x30F6:
+            ch2 = chr(ord(ch2) - 0x60)
+        for j in _jamo(ch2):
+            out.append((j, i))
+    return out
+
+
+def _read_lyrics(path):
+    """가사 파일을 줄 목록으로. [Verse] 같은 대괄호 줄, 빈 줄, 번호만 있는 줄은 뺀다."""
+    import re
+    lines = []
+    for raw in open(path, encoding="utf-8", errors="ignore").read().splitlines():
+        s = raw.strip()
+        if not s or re.fullmatch(r"[\[(（【].*[\])）】]", s) or re.fullmatch(r"[\d\s.\-:]+", s):
+            continue
+        lines.append(s)
+    return lines
+
+
+def compare_lyrics(words, ref_lines, min_line=2):
+    """받아쓴 조각들(words: (시작, 끝, 글, 표시))과 내가 쓴 가사 줄을 맞춰 보고, 줄마다 얼마나 맞는지와 틀린 글자를 찾는다.
+    돌려주는 것: dict(lines=[{line, score, heard, t0, t1, wrong(원래 가사의 글자 번호들), level}], extra=[(t0,t1,text)], overall)"""
+    import difflib
+    good = [(a, b, t) for a, b, t, fl in words if not fl or fl == "원곡에서 받아씀"]
+    heard_chars = []   # (비교 글자, 조각 번호, 조각 안 글자 번호)
+    for k, (a, b, t) in enumerate(good):
+        for j, i in _norm_chars(t):
+            heard_chars.append((j, k, i))
+    ref_chars = []     # (비교 글자, 줄 번호, 줄 안 글자 번호)
+    for li, line in enumerate(ref_lines):
+        for j, i in _norm_chars(line):
+            ref_chars.append((j, li, i))
+    A = [c[0] for c in ref_chars]
+    B = [c[0] for c in heard_chars]
+    sm = difflib.SequenceMatcher(None, A, B, autojunk=False)
+    matched_ref = set()          # 맞은 가사 글자 자리
+    ref_to_heard = {}            # 가사 글자 자리 → 받아쓴 글자 자리
+    matched_heard = set()
+    for tag, i1, i2, j1, j2 in sm.get_opcodes():
+        if tag == "equal":
+            for d in range(i2 - i1):
+                matched_ref.add(i1 + d)
+                ref_to_heard[i1 + d] = j1 + d
+                matched_heard.add(j1 + d)
+        elif tag == "replace":
+            # 바뀐 덩어리끼리는 시각만 이어 둔다(틀린 자리)
+            for d in range(i2 - i1):
+                ref_to_heard[i1 + d] = j1 + min(d, max(0, j2 - j1 - 1))
+    rows = []
+    for li, line in enumerate(ref_lines):
+        idx = [n for n, c in enumerate(ref_chars) if c[1] == li]
+        if len(idx) < min_line:
+            continue
+        # 틀린 글자(원래 줄의 글자 번호) — 자모 하나라도 틀리면 그 글자. 점수는 글자(음절) 단위로 센다
+        wrong = sorted({ref_chars[n][2] for n in idx if n not in matched_ref})
+        n_syl = len({ref_chars[n][2] for n in idx})
+        score = 1.0 - len(wrong) / max(1, n_syl)
+        # 이 줄이 들린 시각: 맞춰진 받아쓴 글자들의 조각 시각
+        hk = [heard_chars[ref_to_heard[n]][1] for n in idx if n in ref_to_heard and ref_to_heard[n] < len(heard_chars)]
+        if hk:
+            k0, k1 = min(hk), max(hk)
+            t0, t1 = good[k0][0], good[k1][1]
+            heard = " ".join(good[k][2] for k in range(k0, k1 + 1))
+        else:
+            t0 = t1 = None
+            heard = ""
+        level = "ok" if not wrong else ("check" if score >= 0.6 else "bad")
+        rows.append(dict(line=line, score=score, heard=heard, t0=t0, t1=t1, wrong=wrong, level=level))
+    # 가사에 없는데 들린 말(받아쓴 조각 중 글자가 거의 안 맞은 것)
+    extra = []
+    for k, (a, b, t) in enumerate(good):
+        idx = [n for n, c in enumerate(heard_chars) if c[1] == k]
+        if len(idx) >= 4 and sum(1 for n in idx if n in matched_heard) / len(idx) < 0.3:
+            extra.append((a, b, t))
+    overall = (sum(r["score"] * len(r["line"]) for r in rows) / max(1, sum(len(r["line"]) for r in rows))) if rows else 0.0
+    return dict(lines=rows, extra=extra, overall=overall, n_heard=len(good))
+
+
+def _mark_wrong(line, wrong):
+    """틀린 글자를 【】로 감싼다(붙은 글자는 한 묶음으로)."""
+    if not wrong:
+        return line
+    out, i = [], 0
+    ws = set(wrong)
+    while i < len(line):
+        if i in ws:
+            j = i
+            while j < len(line) and (j in ws or line[j] == " " and j + 1 in ws):
+                j += 1
+            out.append("【" + line[i:j] + "】")
+            i = j
+        else:
+            out.append(line[i])
+            i += 1
+    return "".join(out)
+
+
+def lyrics_report(res, src_name, model_name, audio_path=None, out=None, snippets=True):
+    """가사 대조 결과를 md 줄 목록으로. 틀린 줄은 소리 조각(wav)도 잘라 둔다."""
+    rows = res["lines"]
+    bad = [r for r in rows if r["level"] == "bad"]
+    chk = [r for r in rows if r["level"] == "check"]
+    L = [f"# 가사 대조 — {src_name}", "",
+         f"- 내가 쓴 가사 {len(rows)}줄 ↔ 받아쓴 조각 {res['n_heard']}개 (모델 {model_name})",
+         f"- 전체 일치 **{res['overall']:.0%}** / 많이 다른 줄 **{len(bad)}** / 조금 다른 줄 **{len(chk)}** / 잘 맞는 줄 {len(rows) - len(bad) - len(chk)}", ""]
+    if res["overall"] < 0.45:
+        L.append("> ⚠️ 전체가 거의 안 맞습니다. 가사 파일이 이 노래 것이 맞는지, 언어(--lang)가 맞는지, 받아쓰기 모델이 너무 작지 않은지 먼저 보세요. 반주가 센 완성곡이면 `--deep`(목소리 분리)으로 다시 해 보세요.")
+        L.append("")
+    L += ["> 【】 안이 받아쓰기와 다르게 들린 글자입니다. **같은 글자가 다른 줄에서는 잘 들렸다면** 그 자리의 발음(또는 음 길이·세기)을 보세요. "
+           "**곡 전체에서 늘 틀리는 글자**(예: ㅅ→ㅆ, 받침 ㄹ)는 받아쓰기 모델의 버릇일 수 있으니 소리 조각을 직접 들어 보고 판단하세요.", ""]
+    L += ["| 정도 | 시각 | 내가 쓴 가사 | 들린 것 | 일치 |", "|---|---|---|---|---|"]
+    for r in rows:
+        if r["level"] == "ok":
+            continue
+        mark = "🔴" if r["level"] == "bad" else "🟠"
+        ts = f"{fmt_t(r['t0'])}~{fmt_t(r['t1'])}" if r["t0"] is not None else "(못 찾음)"
+        L.append(f"| {mark} | {ts} | {_mark_wrong(r['line'], r['wrong'])} | {r['heard'] or '-'} | {r['score']:.0%} |")
+    if not bad and not chk:
+        L.append("| ✅ | | 모든 줄이 잘 들렸습니다 | | |")
+    if res["extra"]:
+        L += ["", "## 가사에 없는데 들린 말", ""]
+        L += [f"- {fmt_t(a)}~{fmt_t(b)} “{t}” — 애드리브·코러스이거나 받아쓰기가 지어낸 말일 수 있음" for a, b, t in res["extra"][:12]]
+    L += ["", "## 잘 맞는 줄", ""]
+    L += [f"- ✅ {fmt_t(r['t0']) if r['t0'] is not None else ''} {r['line']}" for r in rows if r["level"] == "ok"] or ["- 없음"]
+    # 틀린 줄 소리 조각
+    cuts = []
+    if snippets and audio_path and out:
+        import soundfile as sf
+        sd = os.path.join(out, "가사조각")
+        os.makedirs(sd, exist_ok=True)
+        for r in (bad + chk)[:12]:
+            if r["t0"] is None:
+                continue
+            a, b = max(0.0, r["t0"] - 0.3), r["t1"] + 0.3
+            wp = os.path.join(sd, f"{fmt_t(a).replace(':', '분')}_{r['line'][:12].replace('/', ' ')}.wav")
+            rr = subprocess.run(["ffmpeg", "-v", "error", "-y", "-ss", f"{a:.2f}", "-to", f"{b:.2f}", "-i", audio_path, "-ac", "2", wp], capture_output=True)
+            if rr.returncode == 0:
+                cuts.append(wp)
+                r["snippet"] = wp
+        if cuts:
+            L += ["", "## 들어 볼 조각", ""] + [f"- {os.path.relpath(c, out)}" for c in cuts]
+    return L
+
+
+def cmd_lyrics(args):
+    """내가 쓴 가사(txt)와 노래를 맞춰 본다. 받아쓴 words.json이 있으면 그걸 쓰고, 없으면 받아쓴다."""
+    ref = _read_lyrics(args.lyrics)
+    if not ref:
+        sys.exit("가사 파일에서 줄을 못 읽었습니다: " + args.lyrics)
+    out = args.out or (os.path.splitext(os.path.basename(args.file))[0] + "_가사대조")
+    os.makedirs(out, exist_ok=True)
+    words, model_name = [], "-"
+    if args.words and os.path.isfile(args.words):
+        words = [(w["start"], w["end"], w["text"], w.get("flag", "")) for w in json.load(open(args.words, encoding="utf-8"))]
+        model_name = "이미 받아쓴 것"
+    else:
+        model = find_whisper_model(args.model)
+        if not model:
+            sys.exit("받아쓰기 모델(ggml-*.bin)이 없습니다. `setup`을 먼저 돌리거나 --words 로 받아쓴 words.json을 주세요.")
+        model_name = os.path.basename(model)
+        progress_start(out, [("받아쓰기", est_times(probe_dur(args.file), model_big="medium" in model or "large" in model)["words"]), ("가사 대조", 3)])
+        progress_step("받아쓰기")
+        hint = " ".join(ref[:6])[:200]  # 가사 앞부분을 힌트로 주면 고유명사·조어를 덜 틀린다
+        words = clean_segments(transcribe(args.file, model, lang=args.lang, prompt=hint, chunks=looks_vocal_only(args.file)))
+        json.dump([dict(start=a, end=b, text=t, flag=f) for a, b, t, f in words],
+                  open(os.path.join(out, "words.json"), "w", encoding="utf-8"), ensure_ascii=False, indent=1)
+        progress_step("가사 대조")
+    res = compare_lyrics(words, ref)
+    L = lyrics_report(res, os.path.basename(args.file), model_name, audio_path=args.file, out=out)
+    rp = os.path.join(out, "가사대조.md")
+    open(rp, "w", encoding="utf-8").write("\n".join(L))
+    json.dump(dict(overall=res["overall"], lines=[{k: v for k, v in r.items() if k != "snippet"} for r in res["lines"]],
+                   extra=[dict(start=a, end=b, text=t) for a, b, t in res["extra"]]),
+              open(os.path.join(out, "lyrics.json"), "w", encoding="utf-8"), ensure_ascii=False, indent=1, default=float)
+    progress_done()
+    print(f"[완료] {rp}")
+    print("\n".join(L[:12]))
+
+
+def probe_dur(path):
+    try:
+        o = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", path],
+                           capture_output=True, text=True).stdout.strip()
+        return float(o)
+    except Exception:
+        return 0.0
+
+
+# ---------------------------------------------------------------- HTML 한 장 보고서 [v1.8.0]
+def _b64_file(p):
+    import base64
+    with open(p, "rb") as f:
+        return base64.b64encode(f.read()).decode("ascii")
+
+
+def _snippet_b64(audio, t, before=1.0, after=1.4):
+    """시각 앞뒤를 잘라 mp3(base64)로. 못 하면 None."""
+    import tempfile
+    a = max(0.0, float(t) - before)
+    fd, tmp = tempfile.mkstemp(suffix=".mp3")
+    os.close(fd)
+    try:
+        r = subprocess.run(["ffmpeg", "-v", "error", "-y", "-ss", f"{a:.2f}", "-t", f"{before + after:.2f}", "-i", audio,
+                            "-vn", "-ac", "1", "-ar", "32000", "-c:a", "libmp3lame", "-b:a", "80k", tmp], capture_output=True)
+        if r.returncode != 0 or not os.path.getsize(tmp):
+            return None
+        return "data:audio/mpeg;base64," + _b64_file(tmp)
+    except Exception:
+        return None
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+
+
+def build_html(out, title, verdict, summary_rows, items, images, lyrics=None, sections=None, links=None,
+               fname="보고서.html", max_snip=24, max_img=20):
+    """그림과 소리 조각을 안에 넣은 HTML 한 장. 브라우저에서 열어 눌러서 듣고 본다.
+    items: [{level, 시각, src, kind, msg, t, end, _audio}]  images: [(설명, 경로)]
+    lyrics: 가사 대조 dict(lines=[...], extra=[...], overall)  sections: describe의 sections"""
+    import html as H
+    esc = lambda s: H.escape(str(s if s is not None else ""))
+    css = """
+    body{font-family:'Noto Sans KR','Malgun Gothic','Apple SD Gothic Neo',sans-serif;max-width:1100px;margin:24px auto;padding:0 16px;color:#222;line-height:1.5}
+    h1{font-size:1.5em;margin-bottom:4px} h2{font-size:1.15em;margin-top:28px;border-bottom:1px solid #ddd;padding-bottom:4px}
+    .verdict{background:#f3f7ff;border-left:5px solid #3b6fd6;padding:10px 14px;margin:12px 0;font-size:1.05em}
+    table{border-collapse:collapse;width:100%;font-size:.93em} th,td{border:1px solid #e3e3e3;padding:6px 8px;vertical-align:top;text-align:left}
+    th{background:#fafafa} .must{background:#fff1f0} .chk{background:#fff8e6} .info{color:#777}
+    audio{height:30px;width:220px;vertical-align:middle} details summary{cursor:pointer;color:#3b6fd6}
+    img{max-width:100%;border:1px solid #ddd;margin:6px 0} .img-cap{font-size:.85em;color:#666}
+    .wrong{background:#ffd7d7;border-radius:3px;padding:0 2px} .ok{color:#2a8a2a} .small{font-size:.85em;color:#666}
+    .bar{display:inline-block;height:10px;background:#3b6fd6;vertical-align:middle}
+    """
+    P = [f"<!doctype html><html lang='ko'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
+         f"<title>{esc(title)}</title><style>{css}</style></head><body>", f"<h1>🎧 {esc(title)}</h1>",
+         "<div class='small'>sound-ear 보고서 — 그림·소리 조각이 이 파일 안에 들어 있어 혼자서도 열립니다. ▶를 누르면 그 자리를 들을 수 있습니다.</div>",
+         f"<div class='verdict'>{esc(verdict)}</div>"]
+    # 한눈에
+    if summary_rows:
+        P.append("<h2>한눈에</h2><table><tbody>")
+        for k, v in summary_rows:
+            P.append(f"<tr><th style='width:220px'>{esc(k)}</th><td>{esc(v)}</td></tr>")
+        P.append("</tbody></table>")
+    # 고칠 것 + 소리 조각
+    P.append("<h2>고칠 것 · 들어 볼 곳</h2>")
+    show = [p for p in items if p.get("level") != LEVEL_INFO]
+    info = [p for p in items if p.get("level") == LEVEL_INFO]
+    if not show:
+        P.append("<p class='ok'>🎉 크게 고칠 곳이 없습니다.</p>")
+    else:
+        P.append("<table><thead><tr><th>급함</th><th>시각</th><th>어디서</th><th>무엇</th><th>설명</th><th>듣기</th></tr></thead><tbody>")
+        n_snip = 0
+        for p in show:
+            cls = "must" if p["level"] == LEVEL_MUST else "chk"
+            mark = "🔴" if p["level"] == LEVEL_MUST else "🟠"
+            snip = ""
+            t = p.get("t", 0) or 0
+            is_whole = p.get("end") is None and t == 0
+            if not is_whole and p.get("_audio") and n_snip < max_snip and os.path.isfile(p["_audio"]):
+                b = _snippet_b64(p["_audio"], t)
+                if b:
+                    snip = f"<audio controls preload='none' src='{b}'></audio>"
+                    n_snip += 1
+            P.append(f"<tr class='{cls}'><td>{mark}</td><td>{esc(p.get('시각', fmt_t(t)))}</td><td>{esc(p.get('src', ''))}</td>"
+                     f"<td>{esc(p.get('kind', ''))}</td><td>{esc(p.get('msg', ''))}</td><td>{snip}</td></tr>")
+        P.append("</tbody></table>")
+    if info:
+        P.append(f"<details><summary>참고 {len(info)}곳 보기</summary><ul class='info'>")
+        P += [f"<li>{esc(p.get('시각', ''))} {esc(p.get('kind', ''))} — {esc(p.get('msg', ''))}</li>" for p in info]
+        P.append("</ul></details>")
+    # 가사 대조
+    if lyrics and lyrics.get("lines"):
+        rows = lyrics["lines"]
+        bad = sum(1 for r in rows if r["level"] == "bad")
+        chk = sum(1 for r in rows if r["level"] == "check")
+        P.append(f"<h2>가사 대조</h2><p>전체 일치 <b>{lyrics['overall']:.0%}</b> — 많이 다른 줄 {bad}, 조금 다른 줄 {chk}, 잘 맞는 줄 {len(rows) - bad - chk}. "
+                 "<span class='small'>빨간 글자가 받아쓰기와 다르게 들린 곳. 같은 글자가 다른 줄에서는 잘 들렸다면 그 자리의 발음을 보세요.</span></p>")
+        P.append("<table><thead><tr><th>정도</th><th>시각</th><th>내가 쓴 가사</th><th>들린 것</th><th>일치</th><th>듣기</th></tr></thead><tbody>")
+        for r in rows:
+            if r["level"] == "ok":
+                continue
+            marked = "".join(f"<span class='wrong'>{esc(ch)}</span>" if i in set(r["wrong"]) else esc(ch) for i, ch in enumerate(r["line"]))
+            ts = f"{fmt_t(r['t0'])}~{fmt_t(r['t1'])}" if r.get("t0") is not None else "(못 찾음)"
+            snip = ""
+            if r.get("snippet") and os.path.isfile(r["snippet"]):
+                try:
+                    snip = f"<audio controls preload='none' src='data:audio/wav;base64,{_b64_file(r['snippet'])}'></audio>"
+                except Exception:
+                    snip = ""
+            P.append(f"<tr class='{'must' if r['level'] == 'bad' else 'chk'}'><td>{'🔴' if r['level'] == 'bad' else '🟠'}</td><td>{ts}</td>"
+                     f"<td>{marked}</td><td>{esc(r['heard'] or '-')}</td><td>{r['score']:.0%}</td><td>{snip}</td></tr>")
+        if not bad and not chk:
+            P.append("<tr><td>✅</td><td></td><td colspan='4'>모든 줄이 잘 들렸습니다</td></tr>")
+        P.append("</tbody></table>")
+        if lyrics.get("extra"):
+            P.append("<p class='small'>가사에 없는데 들린 말: " + " / ".join(f"{fmt_t(a)} “{esc(t)}”" for a, b, t in lyrics["extra"][:8]) + "</p>")
+    # 구성
+    if sections:
+        P.append("<h2>곡 흐름</h2><table><thead><tr><th>시각</th><th>구간</th><th>세기</th><th>드럼</th><th>저음</th><th>가사</th></tr></thead><tbody>")
+        es = [s.get("energy_db", -30) for s in sections]
+        top = max(es) if es else 0
+        for s in sections:
+            w = int(max(4, 120 + 4 * (s.get("energy_db", -30) - top)))
+            P.append(f"<tr><td>{fmt_t(s['start'])}~{fmt_t(s['end'])}</td><td>{esc(s['name'])}</td><td><span class='bar' style='width:{w}px'></span></td>"
+                     f"<td>{'O' if s.get('drums') else '·'}</td><td>{'O' if s.get('bass') else '·'}</td><td class='small'>{esc((s.get('words') or '')[:70])}</td></tr>")
+        P.append("</tbody></table>")
+    # 그림
+    if images:
+        P.append("<h2>그림</h2>")
+        for cap, pth in images[:max_img]:
+            if os.path.isfile(pth):
+                P.append(f"<div class='img-cap'>{esc(cap)}</div><img src='data:image/png;base64,{_b64_file(pth)}' alt='{esc(cap)}'>")
+        if len(images) > max_img:
+            P.append(f"<p class='small'>그림 {len(images) - max_img}장은 폴더에만 있습니다.</p>")
+    if links:
+        P.append("<h2>자세한 결과(폴더 안 파일)</h2><ul>" + "".join(f"<li>{esc(l)}</li>" for l in links) + "</ul>")
+    P.append("<p class='small'>※ 자동 검사는 '의심 가는 곳'을 찾는 것입니다. 들어 보고 최종 판단하세요.</p></body></html>")
+    hp = os.path.join(out, fname)
+    open(hp, "w", encoding="utf-8").write("\n".join(P))
+    return hp
 
 
 # ---------------------------------------------------------------- 검사들
@@ -733,7 +1188,124 @@ def looks_vocal_only(path):
     return bool(act.any() and float((S[f < 70].sum(0) / tot)[act].mean()) < 0.01)
 
 
+LONG_SEC = 20 * 60     # 이보다 길면 10분 조각으로 나눠 검사한다 (한 시간짜리도 메모리가 안 터지게) [v1.8.0]
+PIECE_SEC = 10 * 60
+
+
+def _pieces(path, out, piece=PIECE_SEC):
+    """긴 파일을 piece초짜리 wav 조각으로 잘라 둔다. [(조각 경로, 시작 초, 길이 초)]"""
+    dur = probe_dur(path)
+    d = os.path.join(out, "_조각")
+    os.makedirs(d, exist_ok=True)
+    res, k, s = [], 0, 0.0
+    while s < dur - 1.0:
+        p = os.path.join(d, f"{k + 1:02d}.wav")
+        if not (os.path.isfile(p) and os.path.getmtime(p) >= os.path.getmtime(path)):
+            subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", path, "-ss", f"{s:.3f}", "-t", str(piece), "-vn", "-ac", "2",
+                            "-c:a", "pcm_f32le", p], check=True)
+        res.append((p, s, min(piece, dur - s)))
+        s += piece
+        k += 1
+    return res
+
+
+def _merge_piece_stats(piece_stats, path, dur):
+    """조각마다 잰 값을 하나로. 크기는 최대, 라우드니스는 조각 길이로 가중한 평균(파워), 개수는 합."""
+    stats = dict(piece_stats[0][0])
+    stats["파일"] = os.path.basename(path)
+    stats["길이"] = fmt_t(dur) + f" ({dur:.1f}초)"
+    stats["긴 파일"] = f"{len(piece_stats)}조각(10분씩)으로 나눠 검사함 — 조각 폴더 안 그림의 시각은 그 조각의 시작부터 센 것"
+    for k in ("최고 크기(dBFS)", "트루 피크(dBTP)"):
+        vals = [s.get(k) for s, _ in piece_stats if isinstance(s.get(k), (int, float))]
+        if vals:
+            stats[k] = max(vals)
+    lu = [(s.get("라우드니스(LUFS)"), L) for s, L in piece_stats if isinstance(s.get("라우드니스(LUFS)"), (int, float))]
+    if lu:
+        tot = sum(L for _, L in lu)
+        stats["라우드니스(LUFS)"] = round(10 * math.log10(sum(10 ** (v / 10) * L / tot for v, L in lu)), 1)
+    for k in ("클리핑 횟수", "딸깍 소리", "큰 숨소리", "음 튐", "찾은 노트 수", "음높이를 믿기 어려운 곳(화음·잡음)"):
+        vals = [s.get(k) for s, _ in piece_stats if isinstance(s.get(k), int)]
+        if vals:
+            stats[k] = sum(vals)
+    for k in ("조(키, 추정)", "빠르기(BPM, 추정)", "음역", "전체 튜닝 치우침(센트)"):
+        if k in stats and stats[k] is not None:
+            stats[k] = f"{stats[k]} (첫 조각에서 잼)"
+    return stats
+
+
+def _check_long(args, dur):
+    """긴 파일: 10분 조각마다 검사하고 결과를 합친다."""
+    from argparse import Namespace
+    path = args.file
+    mode = detect_mode(path, args.mode)
+    out = args.out or (os.path.splitext(os.path.basename(path))[0] + "_소리검사")
+    os.makedirs(out, exist_ok=True)
+    pieces = _pieces(path, out)
+    n = len(pieces)
+    own = _PROG["out"] is None
+    if own:
+        est = est_times(PIECE_SEC)["check_vocal" if mode == "vocal" else "check_mix"]
+        progress_start(out, [(f"조각 {k + 1}/{n} 검사", est) for k in range(n)])
+    all_probs, images, piece_stats, whole = [], [], [], {}
+    for k, (pp, off, plen) in enumerate(pieces):
+        if own:
+            progress_step(f"조각 {k + 1}/{n} ({fmt_t(off)}~{fmt_t(off + plen)}) 검사")
+        else:
+            progress_tick(k / n, f"조각 {k + 1}/{n}", every=0)
+        sub = os.path.join(out, f"조각{k + 1:02d}_{fmt_t(off).replace(':', '분')}부터")
+        st, probs, imgs, _, _ = _check_one(Namespace(file=pp, mode=mode, out=sub, max_zoom=args.max_zoom, key_from=None), pages=False, quiet=True)
+        drop = set()
+        if k > 0:
+            drop |= {"앞 무음 김", "시작이 잘림"}
+        if k < n - 1:
+            drop |= {"끝이 잘림"}
+        for p in probs:
+            if p["kind"] in drop:
+                continue
+            if p["kind"] == "뚝 끊김" and (p["t"] < 0.3 or p["t"] > plen - 0.3):
+                continue  # 조각 경계
+            q = dict(p)
+            is_whole = p.get("end") is None and p["t"] == 0
+            if is_whole:
+                key = (p["kind"], p["level"])
+                if key in whole:
+                    whole[key]["_pieces"].append(k + 1)
+                    continue
+                q["_pieces"] = [k + 1]
+                whole[key] = q
+            else:
+                q["t"] = p["t"] + off
+                if q.get("end") is not None:
+                    q["end"] = p["end"] + off
+            q["조각"] = k + 1
+            all_probs.append(q)
+        images += imgs
+        piece_stats.append((st, plen))
+    for q in all_probs:
+        if q.get("_pieces"):
+            if len(q["_pieces"]) < n:
+                q["msg"] += f" (조각 {', '.join(map(str, q['_pieces']))}에서)"
+            q.pop("_pieces")
+    stats = _merge_piece_stats(piece_stats, path, dur)
+    stats["검사 방식"] = "보컬만" if mode == "vocal" else "완성곡(반주 포함)"
+    order = {LEVEL_MUST: 0, LEVEL_CHECK: 1, LEVEL_INFO: 2}
+    all_probs.sort(key=lambda p: (p["t"] if p.get("end") is not None or p["t"] > 0 else -1, order[p["level"]]))
+    res = _write_check_report(out, path, mode, stats, all_probs, images)
+    if own:
+        progress_done()
+    return res
+
+
 def cmd_check(args):
+    dur = probe_dur(args.file)
+    if dur > LONG_SEC and not getattr(args, "no_split", False):
+        _check_long(args, dur)
+    else:
+        _check_one(args)
+    return 0
+
+
+def _check_one(args, pages=True, quiet=False):
     import librosa
     path = args.file
     mode = detect_mode(path, args.mode)
@@ -783,7 +1355,7 @@ def cmd_check(args):
     draw_view_fixed(y, ysr, 0, dur, pitch, probs, p0, f"전체 보기 — {os.path.basename(path)}")
     images.append(p0)
     page = 30.0
-    if dur > page * 1.2:
+    if pages and dur > page * 1.2:
         k = 1
         s = 0.0
         while s < dur:
@@ -807,7 +1379,11 @@ def cmd_check(args):
         draw_view_fixed(y, ysr, z0, z1, pitch, probs, zp, f"{fmt_t(p['t'])} {p['kind']} 확대")
         images.append(zp)
 
-    # 보고서
+    res = _write_check_report(out, path, mode, stats, probs, images, quiet=quiet)
+    return stats, probs, images, mode, dur
+
+
+def _write_check_report(out, path, mode, stats, probs, images, quiet=False):
     for p in probs:
         p["시각"] = "전체" if (p.get("end") is None and p["t"] == 0) else fmt_t(p["t"])
     must = [p for p in probs if p["level"] == LEVEL_MUST]
@@ -834,11 +1410,21 @@ def cmd_check(args):
         f.write("\n".join(lines))
     with open(os.path.join(out, "result.json"), "w", encoding="utf-8") as f:
         json.dump(dict(stats=stats, problems=[{k: v for k, v in p.items()} for p in probs],
-                       images=images), f, ensure_ascii=False, indent=1, default=float)
-    print(f"[완료] 보고서: {rp}")
-    print(f"꼭 고칠 것 {len(must)} / 들어 보고 판단 {len(chk)} / 참고 {len(inf)} / 그림 {len(images)}장")
-    for p in (must + chk)[:15]:
-        print(f"  {p['시각']} [{p['level']}] {p['kind']}")
+                       images=images, source=os.path.abspath(path), mode=mode), f, ensure_ascii=False, indent=1, default=float)
+    if not quiet:
+        try:  # 한 장짜리 HTML (그림·소리 조각이 안에 들어 있어 눌러서 바로 들을 수 있음)
+            build_html(out, f"소리 검사 — {os.path.basename(path)}",
+                       f"꼭 고칠 것 {len(must)}곳 / 들어 보고 판단 {len(chk)}곳 / 참고 {len(inf)}곳",
+                       [(k, v) for k, v in stats.items()],
+                       [dict(p, src=os.path.basename(path), _audio=path) for p in probs],
+                       [(os.path.basename(i), i) for i in images])
+        except Exception as e:  # noqa
+            print("HTML 보고서를 못 만들었습니다:", e)
+        print(f"[완료] 보고서: {rp}")
+        print(f"꼭 고칠 것 {len(must)} / 들어 보고 판단 {len(chk)} / 참고 {len(inf)} / 그림 {len(images)}장")
+        for p in (must + chk)[:15]:
+            print(f"  {p['시각']} [{p['level']}] {p['kind']}")
+    return rp
 
 
 def cmd_cut(args):
@@ -1010,8 +1596,19 @@ def transcribe(path, model_path, lang="auto", threads=None, prompt=None, chunks=
         info["lang"] = lang or "auto"
     pieces = _speech_chunks(y) if chunks else [(0, len(y))]
     out = []
+    total = max(1.0, len(y) / 16000.0)
     for a, b in pieces:
-        for sg in m.transcribe(np.ascontiguousarray(y[a:b]), language=lang):
+        def _cb(sg, _a=a):  # 진행 표시: 받아쓴 데까지 / 전체 길이
+            try:
+                done = (_a / 16000.0 + sg.t1 / 100.0)
+                progress_tick(min(0.99, done / total), f"{fmt_t(done)}/{fmt_t(total)}")
+            except Exception:
+                pass
+        try:
+            segs_ = m.transcribe(np.ascontiguousarray(y[a:b]), language=lang, new_segment_callback=_cb)
+        except TypeError:
+            segs_ = m.transcribe(np.ascontiguousarray(y[a:b]), language=lang)
+        for sg in segs_:
             txt = sg.text.strip()
             if not txt:
                 continue
@@ -1077,7 +1674,13 @@ def cmd_words(args):
     import time
     st = time.time()
     winfo = {}
+    out = args.out or (os.path.splitext(os.path.basename(args.file))[0] + "_가사")
+    os.makedirs(out, exist_ok=True)
+    if _PROG["out"] is None:
+        progress_start(out, [("받아쓰기", est_times(probe_dur(src), model_big="medium" in model or "large" in model)["words"])])
+        progress_step("받아쓰기")
     segs = transcribe(src, model, lang=args.lang, prompt=args.prompt, chunks=looks_vocal_only(src), info=winfo)
+    progress_done()
     took = time.time() - st
     if tmp:
         os.remove(tmp)
@@ -1155,8 +1758,7 @@ def separate_vocals(path, model, out_dir, clean=False):
         if clean:  # 부호를 뒤집어 한 번 더 돌려 평균 — 잡음이 조금 줄고 두 배 느림
             o = (o - sess.run(None, {"input": -spec})[0]) / 2
         outs.append(istft2(o)[:, TRIM:-TRIM])
-        if (k + 1) % 10 == 0:
-            print(f"  보컬 분리 {k + 1}/{total}")
+        progress_tick((k + 1) / total, f"보컬 분리 {k + 1}/{total}", every=8.0)
     voc = np.concatenate(outs, 1)[:, :n] * 1.009
     inst = mix - voc
     os.makedirs(out_dir, exist_ok=True)
@@ -1255,8 +1857,8 @@ def genre_ko(g):
 def _feat_frames(y, sr, hop):
     import librosa
     from scipy.ndimage import median_filter
-    D = librosa.stft(y, n_fft=2048, hop_length=hop)
-    S = np.abs(D)
+    D = librosa.stft(y.astype(np.float32), n_fft=2048, hop_length=hop)  # float32: 10분 조각에서 메모리 3.6GB → 절반쯤 [v1.8.0]
+    S = np.abs(D).astype(np.float32)
     freqs = librosa.fft_frequencies(sr=sr, n_fft=2048)
     # HPSS는 느려서(4분 곡 한 번에 약 15초) 중앙값 거르기를 한 번만 하고 두 가지 세기(margin 2, 3)로 나눠 쓴다
     # [확인: 10-25 곡 설명에서 HPSS를 세 번 돌려 46초 걸리던 것]
@@ -1389,6 +1991,13 @@ def cmd_describe(args):
     path = args.file
     out = args.out or (os.path.splitext(os.path.basename(path))[0] + "_곡설명")
     os.makedirs(out, exist_ok=True)
+    own = _PROG["out"] is None
+    if own:
+        dd = probe_dur(path)
+        mm = None if args.no_words else find_whisper_model(args.model)
+        E = est_times(dd, model_big=bool(mm and ("medium" in mm or "large" in mm)))
+        progress_start(out, [("곡 설명" + (" (가사 받아쓰기 포함)" if mm and not args.words else ""), E["describe"] + (E["words"] if mm and not args.words else 0))])
+        progress_step("곡 설명")
     st, sr0 = load(path)
     sr = 22050
     y = librosa.resample(st.mean(axis=1), orig_sr=sr0, target_sr=sr)
@@ -1431,7 +2040,7 @@ def cmd_describe(args):
                 # 조용한 틈에서 25초 안쪽으로 잘라 따로 받아쓴다 — 통째로 넣으면 첫 빈 곳 뒤를 다 놓침
                 # [확인: 10-25 일본어 「구마」 분리 목소리 medium: 통째로 1줄(지어낸 말) → 잘라서 37줄, 345초 → 317초]
                 linfo = {}
-                ws = clean_segments(transcribe(vocal_path, model, lang=args.lang, chunks=True, info=linfo))
+                ws = clean_segments(transcribe(vocal_path, model, lang=args.lang, chunks=True, info=linfo, prompt=getattr(args, 'prompt', None)))
                 glang = linfo.get("lang", args.lang)
                 words = list(ws)
                 # 목소리는 나는데 받아쓴 말이 없는 빈 곳(3초 넘게)만 원곡에서 잘라 다시 받아쓴다
@@ -1458,7 +2067,7 @@ def cmd_describe(args):
                     os.remove(clip)
                 words.sort(key=lambda w: w[0])
             else:
-                words = clean_segments(transcribe(path, model, lang=args.lang))
+                words = clean_segments(transcribe(path, model, lang=args.lang, prompt=getattr(args, 'prompt', None)))
             json.dump([dict(start=a, end=b, text=t, flag=fl) for a, b, t, fl in words],
                       open(os.path.join(out, "words.json"), "w", encoding="utf-8"), ensure_ascii=False, indent=1)
             write_srt(os.path.join(out, "자막.srt"), [(a, b, t) for a, b, t, fl in words if not fl or fl == "원곡에서 받아씀"])
@@ -1767,31 +2376,56 @@ def cmd_describe(args):
     ip = os.path.join(out, "곡흐름.png")
     fig.savefig(ip, dpi=80)
     plt.close(fig)
+    if own:
+        progress_done()
     print(f"[완료] {rp}\n       그림: {ip}")
     print("\n".join(lines[:4 + 4 + len(rows)]))
 
 
 # ---------------------------------------------------------------- 한 번에 다 듣기
-def cmd_full(args):
-    """흠 찾기(완성곡) → 목소리 분리 → 음정 검사(목소리) → 곡 설명 → 종합 보고서 한 장."""
-    import time
+def _shift_probs(probs, off, plen, k, n, src, audio, whole_seen):
+    """조각 하나의 문제 목록을 전체 시각으로 옮긴다. 조각 경계에서 생기는 헛짚음은 뺀다."""
+    out = []
+    drop = set()
+    if k > 0:
+        drop |= {"앞 무음 김", "시작이 잘림"}
+    if k < n - 1:
+        drop |= {"끝이 잘림"}
+    for p in probs:
+        if n > 1 and p["kind"] in drop:
+            continue
+        if n > 1 and p["kind"] == "뚝 끊김" and (p["t"] < 0.3 or p["t"] > plen - 0.3):
+            continue
+        q = dict(p)
+        is_whole = p.get("end") is None and p["t"] == 0
+        q["src"] = src
+        q["_audio"] = audio
+        q["_at"] = p["t"]
+        if is_whole:
+            key = (src, p["kind"], p["level"])
+            if key in whole_seen:
+                whole_seen[key]["_pieces"].append(k + 1)
+                continue
+            q["_pieces"] = [k + 1]
+            whole_seen[key] = q
+        else:
+            q["t"] = p["t"] + off
+            if q.get("end") is not None:
+                q["end"] = p["end"] + off
+            q["시각"] = fmt_t(q["t"])
+        out.append(q)
+    return out
+
+
+def _full_one(args, out, path, sep_model, model, top=True):
+    """한 파일(또는 한 조각)에 대해: 분리 → 흠 찾기 → 목소리 음정 → 곡 설명. 결과 json들을 읽어 dict로 돌려준다."""
     from argparse import Namespace
-    path = args.file
-    out = args.out or (os.path.splitext(os.path.basename(path))[0] + "_전체듣기")
     os.makedirs(out, exist_ok=True)
-    t0 = time.time()
-    steps = []
-
-    def step(name):
-        steps.append((name, time.time()))
-        print(f"\n=== {name} ===")
-
-    # 1) 목소리 분리 (모델이 있으면)
+    step = progress_step if top else (lambda name: progress_tick(0.0, name, every=0))
     stems = os.path.join(out, "분리")
     vocal = inst = None
     vocal_only = False
-    sep_model = find_sep_model(args.sep_model) if args.deep else None
-    if args.deep and not sep_model:
+    if args.deep and not sep_model and top:
         print("※ 보컬 분리 모델이 없어 목소리 검사는 건너뜁니다. `setup`으로 준비하세요.")
     if sep_model and not args.no_separate:
         step("목소리와 반주 가르기")
@@ -1799,70 +2433,160 @@ def cmd_full(args):
         if not (os.path.isfile(vp) and os.path.getmtime(vp) >= os.path.getmtime(path)):
             vp, ip = separate_vocals(path, sep_model, stems)
         vocal, inst = vp, ip
-        # 반주가 거의 없으면 처음부터 목소리만 있는 파일
         import soundfile as sf
         a, _ = sf.read(ip, dtype="float32")
         b, _ = sf.read(vp, dtype="float32")
         ra, rb = float(np.sqrt(np.mean(a ** 2))), float(np.sqrt(np.mean(b ** 2)))
         vocal_only = rb > 0 and 20 * np.log10((ra + 1e-9) / rb) < -18
-    # 2) 완성곡 흠 찾기
     step("흠 찾기 (원곡)")
     mode1 = "vocal" if vocal_only else detect_mode(path, args.mode)
-    cmd_check(Namespace(file=path, mode=mode1, out=os.path.join(out, "1_원곡검사"), max_zoom=8, key_from=None))
-    # 3) 목소리 음정 검사
+    _check_one(Namespace(file=path, mode=mode1, out=os.path.join(out, "1_원곡검사"), max_zoom=8, key_from=None), quiet=not top)
     if vocal and not vocal_only:
         step("음정·음 튐 검사 (분리한 목소리)")
-        cmd_check(Namespace(file=vocal, mode="vocal", out=os.path.join(out, "2_목소리검사"), max_zoom=8, key_from=inst))
-    # 4) 곡 설명
+        _check_one(Namespace(file=vocal, mode="vocal", out=os.path.join(out, "2_목소리검사"), max_zoom=8, key_from=inst), quiet=not top)
     step("곡 설명 (구성·가사·악기·분위기)")
     wj = os.path.join(out, "3_곡설명", "words.json")
     reuse = wj if os.path.isfile(wj) and os.path.getmtime(wj) >= os.path.getmtime(path) and not args.redo_words else None
+    hint = None
+    if getattr(args, "lyrics", None) and os.path.isfile(args.lyrics):
+        hint = " ".join(_read_lyrics(args.lyrics)[:6])[:200]  # 내 가사 앞부분을 힌트로 → 고유명사를 덜 틀림
     cmd_describe(Namespace(file=path, model=args.model, lang=args.lang, words=reuse, no_words=args.no_words, out=os.path.join(out, "3_곡설명"),
-                           essentia=None, no_ai=args.no_ai, no_separate=True, sep_model=None, vocal=vocal))
-    # 5) 종합 보고서
+                           essentia=None, no_ai=args.no_ai, no_separate=True, sep_model=None, vocal=vocal, prompt=hint))
+
     def rj(p):
         try:
             return json.load(open(p, encoding="utf-8"))
         except Exception:
             return None
-    c1 = rj(os.path.join(out, "1_원곡검사", "result.json")) or {}
-    c2 = rj(os.path.join(out, "2_목소리검사", "result.json")) or {}
-    d = rj(os.path.join(out, "3_곡설명", "describe.json")) or {}
-    st1 = c1.get("stats", {})
-    st2 = c2.get("stats", {})
-    L = [f"# 종합 보고서 — {os.path.basename(path)}", "", "VERDICT", ""]
-    L.append(f"- 걸린 시간: {time.time() - t0:.0f}초 / " + ("자세히 듣기(--deep)" if args.deep else "빠른 검사 — 목소리만 갈라 음정까지 보려면 `--deep`")
-             + (" / 목소리만 있는 파일로 보고 분리 없이 검사함" if vocal_only else ""))
-    L += ["", "## 한눈에", ""]
-    L.append(f"- **느낌**: {d.get('mood', '-')}")
-    L.append(f"- **길이** {st1.get('길이', '-')} / **조** {d.get('key') or st1.get('조(키, 추정)', '-')} / **빠르기** 약 {d.get('tempo', 0):.0f} BPM / **크기** {st1.get('라우드니스(LUFS)', '-')} LUFS")
-    ai = d.get("ai") or {}
-    if ai:
-        g = ", ".join(genre_ko(x[0]) for x in (ai.get("genre") or [])[:3])
-        m_ = ", ".join(MOOD_KO.get(x[0], x[0]) for x in (ai.get("mood") or [])[:3])
-        i_ = ", ".join(INST_KO.get(x[0], x[0]) for x in (ai.get("instruments") or [])[:5])
-        L.append(f"- **장르** {g or '-'} / **분위기** {m_ or '-'} / **악기** {i_ or '(목소리만)'}")
-    if st2:
-        L.append(f"- **노래 음역** {st2.get('음역', '-')} / 튜닝 치우침 {st2.get('전체 튜닝 치우침(센트)', '-')}센트")
-    secs = d.get("sections") or []
-    if secs:
-        parts, prev = [], None
-        for sx in secs:
-            nm_ = sx["name"].split(" (")[0]
-            if nm_ != prev:
-                parts.append(f"{fmt_t(sx['start'])} {nm_}")
-            prev = nm_
-        L.append("- **구성**: " + " → ".join(parts))
-    # 고칠 것 모으기
-    items = []
-    for src, c in (("원곡", c1), ("목소리", c2)):
-        for p in c.get("problems", []):
-            if src == "목소리" and p["kind"] in ("앞 무음 김", "끝이 잘림", "시작이 잘림", "트루 피크 넘침", "너무 큼", "너무 작음", "소리가 0dB까지 꽉 참", "클리핑(소리 깨짐)"):
+    words = []
+    if os.path.isfile(wj):
+        words = [(w["start"], w["end"], w["text"], w.get("flag", "")) for w in rj(wj) or []]
+    return dict(c1=rj(os.path.join(out, "1_원곡검사", "result.json")) or {},
+                c2=rj(os.path.join(out, "2_목소리검사", "result.json")) or {},
+                d=rj(os.path.join(out, "3_곡설명", "describe.json")) or {},
+                words=words, vocal=vocal, vocal_only=vocal_only, out=out, path=path)
+
+
+def cmd_full(args):
+    """흠 찾기(완성곡) → 목소리 분리 → 음정 검사(목소리) → 곡 설명 → (가사 대조) → 종합 보고서 한 장 + HTML."""
+    import time
+    path = args.file
+    out = args.out or (os.path.splitext(os.path.basename(path))[0] + "_전체듣기")
+    os.makedirs(out, exist_ok=True)
+    t0 = time.time()
+    dur = probe_dur(path)
+    model = None if args.no_words else find_whisper_model(args.model)
+    big = bool(model and ("medium" in model or "large" in model))
+    sep_model = find_sep_model(args.sep_model) if args.deep else None
+    E = est_times(dur, model_big=big)
+    long_mode = dur > LONG_SEC and not getattr(args, "no_split", False)
+    if long_mode:
+        pieces = _pieces(path, out)
+        n = len(pieces)
+        Ep = est_times(PIECE_SEC, model_big=big)
+        per = Ep["check_mix"] + Ep["describe"] + (Ep["words"] if model else 0) + ((Ep["separate"] + Ep["check_vocal"]) if sep_model else 0)
+        steps = [(f"조각 {k + 1}/{n}", per) for k in range(n)]
+    else:
+        pieces = [(path, 0.0, dur)]
+        steps = []
+        if sep_model and not args.no_separate:
+            steps += [("목소리와 반주 가르기", E["separate"])]
+        steps += [("흠 찾기 (원곡)", E["check_mix"])]
+        if sep_model and not args.no_separate:
+            steps += [("음정·음 튐 검사 (분리한 목소리)", E["check_vocal"])]
+        steps += [("곡 설명 (구성·가사·악기·분위기)", E["describe"] + (E["words"] if model else 0))]
+    if getattr(args, "lyrics", None):
+        steps += [("가사 대조", E["lyrics"])]
+    steps += [("종합 보고서", E["html"])]
+    progress_start(out, steps)
+    print(f"예상 시간: 약 {_fmt_dur(sum(e for _, e in steps))} (2코어 기준, 파일 {fmt_t(dur)})", flush=True)
+
+    parts = []
+    for k, (pp, off, plen) in enumerate(pieces):
+        if long_mode:
+            progress_step(f"조각 {k + 1}/{n} ({fmt_t(off)}~{fmt_t(off + plen)})")
+            sub = os.path.join(out, f"조각{k + 1:02d}_{fmt_t(off).replace(':', '분')}부터")
+            r = _full_one(args, sub, pp, sep_model, model, top=False)
+        else:
+            r = _full_one(args, out, pp, sep_model, model, top=True)
+        parts.append((off, plen, r))
+
+    # 가사 대조 (내가 쓴 가사가 있으면)
+    lyr = None
+    if getattr(args, "lyrics", None):
+        progress_step("가사 대조")
+        if not os.path.isfile(args.lyrics):
+            print("※ 가사 파일이 없습니다:", args.lyrics)
+        else:
+            ref = _read_lyrics(args.lyrics)
+            words_all = []
+            for off, plen, r in parts:
+                words_all += [(a + off, b + off, t, fl) for a, b, t, fl in r["words"]]
+            if not words_all:
+                print("※ 받아쓴 가사가 없어 가사 대조를 못 합니다(받아쓰기 모델이 필요).")
+            else:
+                lyr = compare_lyrics(words_all, ref)
+                ld = os.path.join(out, "4_가사대조")
+                os.makedirs(ld, exist_ok=True)
+                mn = os.path.basename(model) if model else "-"
+                LL = lyrics_report(lyr, os.path.basename(path), mn, audio_path=path, out=ld)
+                open(os.path.join(ld, "가사대조.md"), "w", encoding="utf-8").write("\n".join(LL))
+                json.dump(dict(overall=lyr["overall"], lines=[{k: v for k, v in r.items() if k != "snippet"} for r in lyr["lines"]],
+                               extra=[dict(start=a, end=b, text=t) for a, b, t in lyr["extra"]]),
+                          open(os.path.join(ld, "lyrics.json"), "w", encoding="utf-8"), ensure_ascii=False, indent=1, default=float)
+
+    progress_step("종합 보고서")
+    _write_full_report(out, path, parts, args, dur, lyr, t0, long_mode, sep_model is not None)
+    progress_done()
+
+
+def _write_full_report(out, path, parts, args, dur, lyr, t0, long_mode, deep_ready):
+    import time
+    n = len(parts)
+    # 원곡·목소리 문제 모으기(조각이면 시각을 옮김)
+    items, whole = [], {}
+    piece_stats1, piece_stats2 = [], []
+    sections, imgs = [], []
+    for k, (off, plen, r) in enumerate(parts):
+        c1, c2, d = r["c1"], r["c2"], r["d"]
+        if c1.get("stats"):
+            piece_stats1.append((c1["stats"], plen))
+        if c2.get("stats"):
+            piece_stats2.append((c2["stats"], plen))
+        items += _shift_probs(c1.get("problems", []), off, plen, k, n, "원곡", r["path"] if n == 1 else path, whole)
+        if n > 1:  # 조각이면 원곡 시각은 전체 파일 기준이라 원본에서 자른다
+            for q in items:
+                if q["src"] == "원곡" and q.get("_audio") == path:
+                    q["_at"] = q["t"]
+        voc_items = []
+        for p in c2.get("problems", []):
+            if p["kind"] in ("앞 무음 김", "끝이 잘림", "시작이 잘림", "트루 피크 넘침", "너무 큼", "너무 작음", "소리가 0dB까지 꽉 참", "클리핑(소리 깨짐)"):
                 continue  # 분리한 목소리의 크기·앞뒤는 원곡에서 본다
-            if src == "목소리" and p["kind"] in ("딸깍·틱 소리", "노트 끝 틱", "틱이 몰린 구간") and p["level"] == LEVEL_MUST:
+            if p["kind"] in ("딸깍·틱 소리", "노트 끝 틱", "틱이 몰린 구간") and p["level"] == LEVEL_MUST:
                 # 분리한 목소리의 틱은 분리하다 남은 소리일 때가 많다 [확인: 10-25 구마 커버 1:30.3 — 그림에 아무것도 안 보임]
                 p = dict(p, level=LEVEL_CHECK, msg=p["msg"] + " (분리한 목소리에서만 보임 — 분리하다 남은 소리일 수 있으니 원곡에서 들어 보세요)")
-            items.append(dict(src=src, **p))
+            voc_items.append(p)
+        items += _shift_probs(voc_items, off, plen, k, n, "목소리", r.get("vocal"), whole)
+        for s in d.get("sections", []):
+            s2 = dict(s)
+            s2["start"] += off
+            s2["end"] += off
+            if n > 1:
+                s2["name"] = f"[{k + 1}] " + s2["name"]
+            sections.append(s2)
+        base = r["out"]
+        ov = os.path.join(base, "1_원곡검사", "00_전체.png")
+        if os.path.isfile(ov):
+            imgs.append((f"전체 보기{'' if n == 1 else f' — 조각 {k + 1} ({fmt_t(off)}~)'}", ov))
+    for q in items:
+        if q.get("_pieces"):
+            if len(q["_pieces"]) < n:
+                q["msg"] += f" (조각 {', '.join(map(str, q['_pieces']))}에서)"
+            q.pop("_pieces")
+    st1 = piece_stats1[0][0] if n == 1 and piece_stats1 else (_merge_piece_stats(piece_stats1, path, dur) if piece_stats1 else {})
+    st2 = piece_stats2[0][0] if n == 1 and piece_stats2 else (_merge_piece_stats(piece_stats2, path, dur) if piece_stats2 else {})
+    d0 = parts[0][2]["d"]
+    vocal_only = any(r["vocal_only"] for _, _, r in parts)
     # 같은 종류의 🟠가 많으면 한 줄로 묶는다(완성곡의 딸깍은 하이햇·자음일 때가 많아 표만 길어짐) [확인: 10-25 「마법」 빠른 검사 딸깍 8줄]
     grouped = []
     for src in ("원곡", "목소리"):
@@ -1873,12 +2597,47 @@ def cmd_full(args):
                 for p in same:
                     items.remove(p)
                 grouped.append(dict(src=src, kind=f"{kind} {len(same)}곳", level=LEVEL_CHECK, t=same[0].get("t", 0), 시각="여러 곳",
-                                    msg=same[0]["msg"] + f" 시각: {ts_}"))
+                                    msg=same[0]["msg"] + f" 시각: {ts_}", _audio=same[0].get("_audio"), _at=same[0].get("_at", 0)))
     items += grouped
     order = {LEVEL_MUST: 0, LEVEL_CHECK: 1, LEVEL_INFO: 2}
     items.sort(key=lambda p: (order.get(p["level"], 3), p.get("t", 0)))
     n_must = sum(1 for p in items if p["level"] == LEVEL_MUST)
     n_chk = sum(1 for p in items if p["level"] == LEVEL_CHECK)
+
+    L = [f"# 종합 보고서 — {os.path.basename(path)}", "", "VERDICT", ""]
+    L.append(f"- 걸린 시간: {time.time() - t0:.0f}초 / " + ("자세히 듣기(--deep)" if args.deep else "빠른 검사 — 목소리만 갈라 음정까지 보려면 `--deep`")
+             + (" / 목소리만 있는 파일로 보고 분리 없이 검사함" if vocal_only else "")
+             + (f" / 긴 파일이라 {n}조각(10분씩)으로 나눠 검사함" if n > 1 else ""))
+    L += ["", "## 한눈에", ""]
+    L.append(f"- **느낌**: {d0.get('mood', '-')}" + (" (첫 조각 기준)" if n > 1 else ""))
+    L.append(f"- **길이** {st1.get('길이', '-')} / **조** {d0.get('key') or st1.get('조(키, 추정)', '-')} / **빠르기** 약 {d0.get('tempo', 0):.0f} BPM / **크기** {st1.get('라우드니스(LUFS)', '-')} LUFS")
+    ai = d0.get("ai") or {}
+    summary = [("느낌", d0.get("mood", "-")), ("길이", st1.get("길이", "-")), ("조", d0.get("key") or st1.get("조(키, 추정)", "-")),
+               ("빠르기", f"약 {d0.get('tempo', 0):.0f} BPM"), ("크기", f"{st1.get('라우드니스(LUFS)', '-')} LUFS")]
+    if ai:
+        g = ", ".join(genre_ko(x[0]) for x in (ai.get("genre") or [])[:3])
+        m_ = ", ".join(MOOD_KO.get(x[0], x[0]) for x in (ai.get("mood") or [])[:3])
+        i_ = ", ".join(INST_KO.get(x[0], x[0]) for x in (ai.get("instruments") or [])[:5])
+        L.append(f"- **장르** {g or '-'} / **분위기** {m_ or '-'} / **악기** {i_ or '(목소리만)'}")
+        summary += [("장르(AI)", g or "-"), ("분위기(AI)", m_ or "-"), ("악기(AI)", i_ or "(목소리만)")]
+    if st2:
+        L.append(f"- **노래 음역** {st2.get('음역', '-')} / 튜닝 치우침 {st2.get('전체 튜닝 치우침(센트)', '-')}센트")
+        summary += [("노래 음역", st2.get("음역", "-")), ("튜닝 치우침", f"{st2.get('전체 튜닝 치우침(센트)', '-')}센트")]
+    if sections:
+        parts_, prev = [], None
+        for sx in sections:
+            nm_ = sx["name"].split(" (")[0]
+            if nm_ != prev:
+                parts_.append(f"{fmt_t(sx['start'])} {nm_}")
+            prev = nm_
+        if len(parts_) > 14:
+            parts_ = parts_[:14] + [f"… (모두 {len(sections)}구간 — 보고서.html의 곡 흐름 표에)"]
+        L.append("- **구성**: " + " → ".join(parts_))
+    if lyr:
+        bad = sum(1 for r in lyr["lines"] if r["level"] == "bad")
+        chk = sum(1 for r in lyr["lines"] if r["level"] == "check")
+        L.append(f"- **가사 대조**: 전체 일치 {lyr['overall']:.0%} — 많이 다른 줄 {bad}, 조금 다른 줄 {chk} (자세히: `4_가사대조/가사대조.md`)")
+        summary += [("가사 대조", f"일치 {lyr['overall']:.0%} — 많이 다른 줄 {bad}, 조금 다른 줄 {chk}")]
     L += ["", f"## 고칠 것 — 꼭 {n_must}곳 / 들어 보고 판단 {n_chk}곳", ""]
     if n_must == 0 and n_chk == 0:
         verdict = "크게 고칠 곳 없음 👍"
@@ -1888,6 +2647,10 @@ def cmd_full(args):
         verdict = f"꼭 고칠 곳 {n_must}곳 🔧 — 아래 표 맨 위부터 고치면 됩니다"
     else:
         verdict = f"고칠 곳이 많음 ⚠️ (꼭 {n_must}곳) — 아래 표 맨 위부터 하나씩 보세요"
+    if lyr:
+        bad = sum(1 for r in lyr["lines"] if r["level"] == "bad")
+        if bad:
+            verdict += f" / 가사가 다르게 들린 줄 {bad}줄 🎤"
     L[L.index("VERDICT")] = f"> **한마디: {verdict}**" + (
         "\n>\n> 🟠 '들어 보고 판단'은 잘 만든 곡에서도 흔히 나옵니다(일부러 넣은 효과·악기 소리일 때가 많음). 귀로 듣고 괜찮으면 넘어가세요." if n_chk else "")
     if not [p for p in items if p["level"] != LEVEL_INFO]:
@@ -1901,15 +2664,48 @@ def cmd_full(args):
     n_info = sum(1 for p in items if p["level"] == LEVEL_INFO)
     if n_info and not args.all:
         L.append(f"\n참고 {n_info}곳은 각 검사 보고서에 있습니다.")
+    if lyr:
+        L += ["", "## 가사 대조 (내가 쓴 가사 ↔ 들린 것)", ""]
+        rows = [r for r in lyr["lines"] if r["level"] != "ok"]
+        if not rows:
+            L.append("- ✅ 모든 줄이 잘 들렸습니다")
+        else:
+            L += ["| 정도 | 시각 | 내가 쓴 가사 | 들린 것 |", "|---|---|---|---|"]
+            for r in rows[:20]:
+                ts = f"{fmt_t(r['t0'])}~{fmt_t(r['t1'])}" if r["t0"] is not None else "(못 찾음)"
+                L.append(f"| {'🔴' if r['level'] == 'bad' else '🟠'} | {ts} | {_mark_wrong(r['line'], r['wrong'])} | {r['heard'] or '-'} |")
+            if len(rows) > 20:
+                L.append(f"\n나머지 {len(rows) - 20}줄은 `4_가사대조/가사대조.md`에 있습니다.")
+    sub = "" if n == 1 else "조각NN_…/"
     L += ["", "## 자세한 결과", "",
-          "- 원곡 흠 찾기: `1_원곡검사/보고서.md` (그림: `1_원곡검사/00_전체.png`, `확대/`)"]
+          f"- 보고서 HTML 한 장(그림·소리 조각 포함, 브라우저로 열기): `보고서.html`",
+          f"- 원곡 흠 찾기: `{sub}1_원곡검사/보고서.md` (그림: `{sub}1_원곡검사/00_전체.png`, `확대/`)"]
     if st2:
-        L.append("- 목소리 음정 검사: `2_목소리검사/보고서.md` (음높이 그림 포함)")
-    L.append("- 곡 설명·가사: `3_곡설명/곡설명.md`, 흐름 그림 `3_곡설명/곡흐름.png`, 자막 파일 `3_곡설명/자막.srt`")
-    if vocal:
-        L.append("- 갈라낸 소리: `분리/보컬.wav`, `분리/반주.wav`")
+        L.append(f"- 목소리 음정 검사: `{sub}2_목소리검사/보고서.md` (음높이 그림 포함)")
+    L.append(f"- 곡 설명·가사: `{sub}3_곡설명/곡설명.md`, 흐름 그림 `{sub}3_곡설명/곡흐름.png`, 자막 파일 `{sub}3_곡설명/자막.srt`")
+    if lyr:
+        L.append("- 가사 대조: `4_가사대조/가사대조.md`, 틀린 줄 소리 조각 `4_가사대조/가사조각/`")
+    if deep_ready:
+        L.append(f"- 갈라낸 소리: `{sub}분리/보컬.wav`, `{sub}분리/반주.wav`")
+    if n > 1:
+        L.append("- 조각 폴더 안 그림의 시각은 그 조각의 시작부터 센 것입니다(폴더 이름에 시작 시각이 있음).")
+    L.append("- 진행 기록: `진행.txt`")
     rp = os.path.join(out, "종합보고서.md")
     open(rp, "w", encoding="utf-8").write("\n".join(L))
+    # HTML 한 장
+    for _, _, r in parts:
+        for folder in ("1_원곡검사", "2_목소리검사"):
+            zd = os.path.join(r["out"], folder, "확대")
+            if os.path.isdir(zd):
+                imgs += [(f"{'원곡' if folder.startswith('1') else '목소리'} 확대 — {f[:-4]}", os.path.join(zd, f)) for f in sorted(os.listdir(zd))[:8]]
+        fl = os.path.join(r["out"], "3_곡설명", "곡흐름.png")
+        if os.path.isfile(fl):
+            imgs.append(("곡 흐름", fl))
+    try:
+        build_html(out, f"종합 보고서 — {os.path.basename(path)}", "한마디: " + verdict, summary, items, imgs, lyrics=lyr, sections=sections,
+                   links=[l[2:] for l in L[L.index("## 자세한 결과") + 2:] if l.startswith("- ")])
+    except Exception as e:  # noqa
+        print("HTML 보고서를 못 만들었습니다:", e)
     print(f"\n[완료] {rp} ({time.time() - t0:.0f}초)")
     print("\n".join(L[:14]))
 
@@ -1923,7 +2719,7 @@ ESS_FILES = ["feature-extractors/discogs-effnet/discogs-effnet-bs64-1.pb"] + [
 WHISPER_URL = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/{}"
 PKGS = [("librosa", "librosa"), ("soundfile", "soundfile"), ("pyloudnorm", "pyloudnorm"), ("matplotlib", "matplotlib"),
         ("koreanize_matplotlib", "koreanize-matplotlib"), ("scipy", "scipy"), ("pywhispercpp", "pywhispercpp"),
-        ("onnxruntime", "onnxruntime"), ("essentia", "essentia-tensorflow")]
+        ("onnxruntime", "onnxruntime"), ("essentia", "essentia-tensorflow"), ("pykakasi", "pykakasi")]
 
 
 def _pip(name):
@@ -2100,7 +2896,17 @@ def main():
     c.add_argument("--out")
     c.add_argument("--max-zoom", type=int, default=12)
     c.add_argument("--key-from", help="조(키)를 잴 다른 파일(반주·원곡). 보컬.wav 옆에 반주.wav가 있으면 자동")
+    c.add_argument("--no-split", action="store_true", help="20분 넘는 파일도 조각내지 않고 한 번에(메모리가 넉넉할 때)")
     c.set_defaults(fn=cmd_check)
+    ly = sub.add_parser("lyrics", help="가사 대조: 내가 쓴 가사(txt)와 들린 것을 맞춰 발음이 뭉개진 곳 찾기")
+    ly.add_argument("file")
+    ly.add_argument("lyrics", help="내가 쓴 가사 txt (한 줄에 한 소절)")
+    ly.add_argument("--words", help="이미 받아쓴 words.json (있으면 다시 받아쓰지 않음)")
+    ly.add_argument("--model")
+    ly.add_argument("--lang", default="auto")
+    ly.add_argument("--fast", action="store_true")
+    ly.add_argument("--out")
+    ly.set_defaults(fn=cmd_lyrics)
     k = sub.add_parser("cut")
     k.add_argument("file")
     k.add_argument("time")
@@ -2130,6 +2936,7 @@ def main():
     d.add_argument("--no-separate", action="store_true", help="보컬 분리 끄기")
     d.add_argument("--sep-model", help="Kim_Vocal_2.onnx 경로")
     d.add_argument("--vocal", help="이미 갈라 둔 보컬.wav (분리를 건너뜀)")
+    d.add_argument("--prompt", help="받아쓰기 힌트(곡 제목·자주 나오는 말)")
     sp = sub.add_parser("separate", help="목소리와 반주 가르기 (보컬.wav, 반주.wav)")
     sp.add_argument("file")
     sp.add_argument("--model")
@@ -2151,6 +2958,8 @@ def main():
     fu.add_argument("--no-ai", action="store_true")
     fu.add_argument("--all", action="store_true", help="참고 항목까지 종합 보고서에 넣기")
     fu.add_argument("--redo-words", action="store_true", help="이미 받아쓴 가사가 있어도 다시 받아쓰기")
+    fu.add_argument("--lyrics", help="내가 쓴 가사 txt — 들린 것과 맞춰 발음이 뭉개진 줄을 찾아 종합보고서에 넣음")
+    fu.add_argument("--no-split", action="store_true", help="20분 넘는 파일도 조각내지 않고 한 번에")
     fu.add_argument("--out")
     fu.set_defaults(fn=cmd_full)
     se = sub.add_parser("setup", help="필요한 프로그램·모델을 한 번에 확인하고 준비")

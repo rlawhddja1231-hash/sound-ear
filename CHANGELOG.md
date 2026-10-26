@@ -4,6 +4,13 @@
 
 판마다 무엇이 바뀌었는지 적은 기록입니다. 받는 곳: [Releases](https://github.com/rlawhddja1231-hash/sound-ear/releases) — Claude Code는 `/plugin` 업데이트, claude.ai는 새 `sound-ear.zip`을 다시 올리면 됩니다.
 
+## v1.8.0 — 2026-10-26 · 가사 대조, HTML 보고서, 진행 표시, 긴 파일
+- **가사 대조** (`lyrics` 명령, `full --lyrics 가사.txt`): 내가 쓴 가사와 받아쓴 것을 자모 단위로 맞춰 **발음이 뭉개진 글자**를 【】로 표시, 줄마다 일치율과 시각, 틀린 줄은 소리 조각(`가사조각/`)으로. 가사에 없는데 들린 말(애드리브·지어낸 말)도 따로. 영어·일본어(pykakasi로 히라가나 비교)도 됨. 가사 앞부분을 받아쓰기 힌트로 줘 고유명사를 덜 틀림.
+- **HTML 보고서** (`보고서.html`): `full`·`check`마다 한 장. 한마디 평가, 고칠 것 표(자리마다 ▶ 소리 조각), 가사 대조, 곡 흐름, 그림이 다 들어 있고 혼자서 열림.
+- **진행 표시**: 시작할 때 예상 시간, 단계마다 "[2/4] 흠 찾기 — 지금까지 13초, 남은 시간 약 1분", 받아쓰기·보컬 분리는 % 로. 같은 내용이 `진행.txt`에도 남아 뒤에서 돌려 둔 작업을 확인할 수 있음.
+- **긴 파일**: 20분 넘는 파일은 10분 조각으로 나눠 검사·설명하고 전체 시각으로 합친 보고서 하나를 냄(조각 경계의 '잘림'·'끊김' 헛짚음은 뺌, 라우드니스는 조각 길이로 가중). `--no-split`으로 끌 수 있음.
+- 확인: librosa 1.0에서도 자체 시험 통과. 조각 wav는 `_조각/`에 남으니 다 보고 나면 지워도 됨.
+
 ## v1.7.0 — 2026-10-25 · 일본어 가사, 더 빠른 곡 설명, 보컬만 있는 파일 알아채기
 - **갈라낸 목소리 가사**: 조용한 틈마다 25초 안쪽으로 잘라 받아씀 → 일본어 합성 보컬 가사가 1줄에서 37줄로. (완성곡은 자르면 오히려 나빠져 통째로 받아씀)
 - **언어 자동 고르기**: 처음 30초가 아니라 노래가 가장 빽빽한 곳으로 정함 — 전주가 길어도 맞음.
@@ -51,6 +58,7 @@
 <a id="english"></a>
 # English
 
+- **1.8.0** — `lyrics` command and `full --lyrics`: align written lyrics with the transcript (Korean jamo level, Japanese via kana) and flag garbled syllables with snippets; self-contained `보고서.html` with embedded pictures and ▶ snippets; step progress with time remaining (`진행.txt`); files over 20 min processed in 10-minute pieces and merged (`--no-split` to disable); verified on librosa 1.0.
 - **1.7.0** — Stems and vocal-only files transcribed in pause-split ≤25 s pieces (Japanese synth vocal 1 → 37 lines); language detected from the densest singing; `describe` ~1.8× faster; vocal-only files detected automatically; chorus naming fixed for ballads; grouped report rows.
 - **1.6.0** — `setup` command; quick `full` by default, `--deep` for separation and vocal pitch; one-line verdict; example report; fixes for missed dropouts, note-end pitch glitches, hi-hat sibilance, separated-vocal clicks, "(♪~♪)" output.
 - **1.5.0** — One-command `full` report; medium lyrics model; better chorus detection; synthetic mix test.
