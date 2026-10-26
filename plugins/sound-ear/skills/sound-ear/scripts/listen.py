@@ -11,6 +11,7 @@
   python3 listen.py words  노래.wav [--lang ko] [--model ggml-small-q5_1.bin] [--out 폴더]
   python3 listen.py lyrics 노래.wav 가사.txt [--out 폴더]   (내가 쓴 가사와 들린 것 맞춰 보기)
   python3 listen.py origin 노래.mp3 [--out 폴더]            (꼬리표·출처 서명으로 어디서 만든 파일인지)
+  python3 listen.py notes  보컬.wav 노래.svp [--out 폴더]    (노트마다 음정·길이·흠 — 몇 번째 노트를 고칠지)
   python3 listen.py full   노래.wav --lyrics 가사.txt      (종합보고서에 가사 대조까지, 보고서.html도 같이)
 
 check   : 소리 전체를 검사해 보고서(보고서.md, result.json)와 그림을 만든다.
@@ -772,6 +773,367 @@ def cmd_origin(args):
     if not getattr(args, "quiet", False):
         print(f"[완료] {rp}")
         print("\n".join(L[:12]))
+    return 0
+
+
+
+# ---------------------------------------------------------------- 노트 단위 검사 (브이신스 .svp / 보컬로이드 .vpr / UTAU .ust / MIDI) [v1.9.0]
+SVP_Q = 705600000          # 브이신스: 4분음표 하나 = 705,600,000 blick
+MIDI_Q = 480               # 보컬로이드 vpr·UTAU ust: 4분음표 하나 = 480 틱
+
+
+def _tempo_map(tempos, q):
+    """[(위치틱, bpm)] → 틱을 초로 바꾸는 함수. 템포가 중간에 바뀌어도 맞음."""
+    tempos = sorted((int(p), float(b)) for p, b in tempos) or [(0, 120.0)]
+    if tempos[0][0] > 0:
+        tempos.insert(0, (0, tempos[0][1]))
+    segs = []   # (시작틱, 시작초, bpm)
+    sec = 0.0
+    for i, (p, b) in enumerate(tempos):
+        if i > 0:
+            pp, bb = tempos[i - 1]
+            sec += (p - pp) / q * 60.0 / bb
+        segs.append((p, sec, b))
+
+    def to_sec(tick):
+        s = segs[0]
+        for sg in segs:
+            if sg[0] <= tick:
+                s = sg
+        return s[1] + (tick - s[0]) / q * 60.0 / s[2]
+    return to_sec
+
+
+def read_project(path, track=None):
+    """노래 프로젝트에서 노트 목록을 읽는다. [{i, start, end, pitch(midi), lyric, phonemes, track}]
+    되는 형식: 브이신스 .svp, 보컬로이드5/6 .vpr, UTAU .ust, 표준 MIDI .mid"""
+    ext = os.path.splitext(path)[1].lower()
+    notes, tracks = [], []
+    if ext == ".svp":
+        j = json.load(open(path, encoding="utf-8-sig"))
+        to_sec = _tempo_map([(t["position"], t["bpm"]) for t in j.get("time", {}).get("tempo", [])], SVP_Q)
+        lib = {g.get("uuid"): g for g in j.get("library", [])}
+        for tr in j.get("tracks", []):
+            name = tr.get("name", "")
+            tracks.append(name)
+            if track and name != track:
+                continue
+            groups = [(tr.get("mainGroup", {}), int((tr.get("mainRef") or {}).get("blickOffset", 0)))]
+            for ref in tr.get("groups", []):
+                g = lib.get(ref.get("groupID"))
+                if g:
+                    groups.append((g, int(ref.get("blickOffset", 0))))
+            for g, off in groups:
+                for n in g.get("notes", []):
+                    a, d = int(n["onset"]) + off, int(n["duration"])
+                    notes.append(dict(start=to_sec(a), end=to_sec(a + d), pitch=int(n["pitch"]), lyric=str(n.get("lyrics", "")),
+                                      phonemes=str(n.get("phonemes", "")), track=name))
+    elif ext == ".vpr":
+        import zipfile
+        with zipfile.ZipFile(path) as z:
+            seq = next(n for n in z.namelist() if n.endswith("sequence.json"))
+            j = json.loads(z.read(seq).decode("utf-8"))
+        ev = (j.get("masterTrack", {}).get("tempo", {}) or {}).get("events", [])
+        to_sec = _tempo_map([(e["pos"], e["value"] / 100.0) for e in ev], MIDI_Q)
+        for tr in j.get("tracks", []):
+            name = tr.get("name", "")
+            tracks.append(name)
+            if track and name != track:
+                continue
+            for part in tr.get("parts", []):
+                off = int(part.get("pos", 0))
+                for n in part.get("notes", []):
+                    a, d = off + int(n["pos"]), int(n["duration"])
+                    notes.append(dict(start=to_sec(a), end=to_sec(a + d), pitch=int(n["number"]), lyric=str(n.get("lyric", "")),
+                                      phonemes=str(n.get("phoneme", "")), track=name))
+    elif ext == ".ust":
+        raw = open(path, "rb").read()
+        for enc in ("utf-8-sig", "cp932", "cp949", "latin-1"):
+            try:
+                txt = raw.decode(enc)
+                break
+            except Exception:
+                continue
+        tempo, tick, cur = 120.0, 0, None
+        items = []
+        for line in txt.splitlines():
+            line = line.strip()
+            if line.startswith("[#"):
+                if cur is not None:
+                    items.append(cur)
+                cur = {"_sec": line} if line not in ("[#SETTING]", "[#VERSION]", "[#TRACKEND]") else None
+                continue
+            if "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            if k == "Tempo":
+                try:
+                    tempo = float(v)
+                except ValueError:
+                    pass
+                if cur is not None:
+                    cur["Tempo"] = tempo
+            elif cur is not None:
+                cur[k] = v
+        if cur is not None:
+            items.append(cur)
+        tracks.append("UTAU")
+        sec = 0.0
+        bpm = tempo
+        for it in items:
+            bpm = float(it.get("Tempo", bpm))
+            L = int(float(it.get("Length", 0)))
+            dur = L / MIDI_Q * 60.0 / bpm
+            lyric = it.get("Lyric", "")
+            if lyric not in ("R", "r", "", "休"):
+                notes.append(dict(start=sec, end=sec + dur, pitch=int(it.get("NoteNum", 60)), lyric=lyric, phonemes="", track="UTAU"))
+            sec += dur
+    elif ext in (".mid", ".midi"):
+        notes, tracks = _read_midi(path, track)
+    else:
+        sys.exit("모르는 프로젝트 형식입니다: " + ext + " (.svp .vpr .ust .mid 가 됩니다)")
+    notes.sort(key=lambda n: n["start"])
+    for i, n in enumerate(notes, 1):
+        n["i"] = i
+    return notes, tracks
+
+
+def _read_midi(path, track=None):
+    """표준 MIDI를 아주 단순하게 읽는다(노트·템포·가사 메타만)."""
+    data = open(path, "rb").read()
+    if data[:4] != b"MThd":
+        sys.exit("MIDI 파일이 아닙니다")
+    hlen = int.from_bytes(data[4:8], "big")
+    fmt, ntr, div = int.from_bytes(data[8:10], "big"), int.from_bytes(data[10:12], "big"), int.from_bytes(data[12:14], "big")
+    pos = 8 + hlen
+    tempos, raw_tracks = [], []
+    for ti in range(ntr):
+        if data[pos:pos + 4] != b"MTrk":
+            break
+        tl = int.from_bytes(data[pos + 4:pos + 8], "big")
+        chunk = data[pos + 8: pos + 8 + tl]
+        pos += 8 + tl
+        p, tick, status, name = 0, 0, 0, f"track{ti}"
+        on, notes, lyrics = {}, [], []
+
+        def vlq():
+            nonlocal p
+            v = 0
+            while True:
+                b = chunk[p]
+                p += 1
+                v = (v << 7) | (b & 0x7F)
+                if not b & 0x80:
+                    return v
+        while p < len(chunk):
+            tick += vlq()
+            b = chunk[p]
+            if b == 0xFF:
+                typ = chunk[p + 1]
+                p += 2
+                ln = vlq()
+                body = chunk[p:p + ln]
+                p += ln
+                if typ == 0x51:
+                    tempos.append((tick, 60000000.0 / int.from_bytes(body, "big")))
+                elif typ == 0x03:
+                    name = body.decode("utf-8", "ignore")
+                elif typ == 0x05:
+                    lyrics.append((tick, body.decode("utf-8", "ignore")))
+                continue
+            if b in (0xF0, 0xF7):
+                p += 1
+                ln = vlq()
+                p += ln
+                continue
+            if b & 0x80:
+                status = b
+                p += 1
+            ev = status & 0xF0
+            if ev in (0x80, 0x90, 0xA0, 0xB0, 0xE0):
+                d1, d2 = chunk[p], chunk[p + 1]
+                p += 2
+            else:
+                d1, d2 = chunk[p], 0
+                p += 1
+            if ev == 0x90 and d2 > 0:
+                on[d1] = tick
+            elif ev == 0x80 or (ev == 0x90 and d2 == 0):
+                if d1 in on:
+                    notes.append((on.pop(d1), tick, d1))
+        raw_tracks.append((name, notes, lyrics))
+    to_sec = _tempo_map(tempos, div)
+    out, names = [], []
+    for name, notes, lyrics in raw_tracks:
+        names.append(name)
+        if not notes or (track and name != track):
+            continue
+        for a, b, pch in notes:
+            lyr = next((t for tk, t in lyrics if tk == a), "")
+            out.append(dict(start=to_sec(a), end=to_sec(b), pitch=pch, lyric=lyr, phonemes="", track=name))
+    return out, names
+
+
+def _best_offset(notes, pt, pm, search=1.5, step=0.01):
+    """소리의 음높이 곡선이 노트에 가장 잘 맞는 시간차(초)를 찾는다(렌더 앞에 빈 소리가 붙었을 때). 양수면 소리가 늦음."""
+    best, boff = -1, 0.0
+    good = np.isfinite(pm)
+    for off in np.arange(-search, search + 1e-9, step):
+        score = 0
+        for n in notes:
+            m = good & (pt >= n["start"] + off) & (pt < n["end"] + off)
+            if m.any():
+                score += int(np.sum(np.abs(pm[m] - n["pitch"]) < 0.8))
+        if score > best:
+            best, boff = score, float(off)
+    return boff
+
+
+def cmd_notes(args):
+    """노래 소리 + 프로젝트 파일 → 노트마다 음정·길이·흠을 짚는 표. 몇 번째 노트를 고치면 되는지 바로 보이게."""
+    import librosa
+    from argparse import Namespace
+    notes, tracks = read_project(args.project, args.track)
+    if not notes:
+        sys.exit("노트를 못 읽었습니다. 트랙 이름: " + ", ".join(tracks) + " → --track 으로 고르세요")
+    out = args.out or (os.path.splitext(os.path.basename(args.file))[0] + "_노트검사")
+    os.makedirs(out, exist_ok=True)
+    dur_p = probe_dur(args.file)
+    progress_start(out, [("음높이 재기", 10 + 0.25 * dur_p), ("흠 찾기", est_times(dur_p)["check_vocal"]), ("노트 맞추기", 3)])
+    progress_step("음높이 재기")
+    st, sr0 = load(args.file)
+    sr = 22050
+    y = librosa.resample(st.mean(axis=1), orig_sr=sr0, target_sr=sr)
+    hop = 256
+    f0, vflag, _ = librosa.pyin(y, fmin=65.0, fmax=1400.0, sr=sr, frame_length=2048, hop_length=hop)
+    pt = librosa.times_like(f0, sr=sr, hop_length=hop)
+    pm = np.where(vflag & np.isfinite(f0), 69 + 12 * np.log2(np.where(np.isfinite(f0), f0, 1.0) / 440.0), np.nan)
+    rms = librosa.feature.rms(y=y, frame_length=2048, hop_length=hop)[0][: len(pt)]
+    rdb = db(rms)
+    loud = float(np.percentile(rdb, 90))
+    off = args.offset if args.offset is not None else _best_offset(notes, pt, pm)
+    # 흠 찾기(보컬 모드) — 이미 한 결과가 있으면 재사용
+    progress_step("흠 찾기")
+    cdir = os.path.join(out, "소리검사")
+    rj = os.path.join(cdir, "result.json")
+    if not (os.path.isfile(rj) and os.path.getmtime(rj) >= os.path.getmtime(args.file)):
+        _check_one(Namespace(file=args.file, mode="vocal", out=cdir, max_zoom=8, key_from=None), quiet=True)
+    probs = [p for p in json.load(open(rj, encoding="utf-8")).get("problems", []) if not (p.get("end") is None and p["t"] == 0)]
+    progress_step("노트 맞추기")
+    rows = []
+    n_bad = n_chk = 0
+    for n in notes:
+        a, b = n["start"] + off, n["end"] + off
+        length = n["end"] - n["start"]
+        pad = min(0.03, length * 0.2)
+        m = (pt >= a + pad) & (pt < b - pad)
+        core = pm[m]
+        voiced = core[np.isfinite(core)]
+        issues = []
+        cents = None
+        vfrac = float(len(voiced) / max(1, len(core)))
+        mm_all = (pt >= a) & (pt < b)
+        thr = loud - 25
+        sounding = float(np.sum(rdb[mm_all] > thr)) * hop / sr if mm_all.any() else 0.0
+        # 앞 노트의 꼬리(릴리스)가 넘어온 것과 가르기: 노트 시작에서 소리가 '새로 커지는지', 뒤쪽 구간에 소리가 있는지
+        late = (pt >= a + min(0.08, 0.3 * length)) & (pt < b)
+        sounding_late = float(np.sum(rdb[late] > thr)) * hop / sr if late.any() else 0.0
+        e_m, p_m = (pt >= a) & (pt < a + 0.05), (pt >= a - 0.05) & (pt < a)
+        early_lv = float(np.median(rdb[e_m])) if e_m.any() else -120.0
+        pre_lv = float(np.median(rdb[p_m])) if p_m.any() else -120.0
+        onset = early_lv > thr and early_lv > pre_lv + 3
+        if length > 0.12 and 0.02 <= sounding < 0.5 * length and onset:
+            # 실제로 난 소리만으로 음정을 잰다
+            sm = mm_all & (rdb > thr)
+            core = pm[sm]
+            voiced = core[np.isfinite(core)]
+            vfrac = float(len(voiced) / max(1, len(core)))
+        if sounding_late < 0.05 and not onset:
+            issues.append(("🔴", "소리가 없음 — 노트가 렌더에 없거나 음소거"))
+        elif vfrac < 0.3:
+            issues.append(("🟠", f"목소리로 안 들림(유성 {vfrac:.0%}) — 숨·자음만 남았거나 너무 짧음"))
+        else:
+            cents = float(np.median(voiced) - n["pitch"]) * 100
+            if abs(cents) > 60:
+                issues.append(("🔴", f"음정 {cents:+.0f}센트 — {note_name(n['pitch'] + round(cents / 100))} 쪽으로 들림"))
+            elif abs(cents) > 30:
+                issues.append(("🟠", f"음정 {cents:+.0f}센트 치우침"))
+            sp = float(np.nanstd(core)) * 100 if len(voiced) > 4 else 0.0
+            if sp > 80 and length > 0.25:
+                issues.append(("🟠", f"노트 안에서 음이 {sp:.0f}센트나 흔들림(비브라토·꺾임이 과한지)"))
+        # 쓴 길이보다 실제로 난 소리가 훨씬 짧으면(끝이 일찍 죽음·음소가 짧음)
+        if length > 0.12 and 0.02 <= sounding < 0.5 * length and onset:
+            issues.append(("🟠", f"쓴 길이 {length * 1000:.0f}ms인데 실제 소리는 {sounding * 1000:.0f}ms — 끝이 일찍 끊기거나 음소가 짧음"))
+        if length < 0.08 and n["lyric"] and n["lyric"] not in ("-", "+", "a", "あ"):
+            issues.append(("🟠", f"길이 {length * 1000:.0f}ms — 너무 짧아 '{n['lyric']}' 발음이 뭉개질 수 있음"))
+        # 이 노트 자리의 흠(끝·시작 50ms 안도 포함)
+        for p in probs:
+            t = p["t"]
+            if a - 0.05 <= t <= b + 0.05 and p["kind"] not in ("음정 어긋남",):
+                where = "끝" if t > b - 0.06 else ("시작" if t < a + 0.06 else "중간")
+                issues.append(("🔴" if p["level"] == LEVEL_MUST else "🟠", f"{p['kind']} ({where}, {fmt_t(t)})"))
+        if any(x[0] == "🔴" for x in issues):
+            n_bad += 1
+        elif issues:
+            n_chk += 1
+        rows.append(dict(i=n["i"], start=a, end=b, length=length, lyric=n["lyric"], pitch=n["pitch"], cents=cents, voiced=vfrac,
+                         issues=issues, track=n["track"]))
+    verdict = ("노트 전부 깨끗함 👍" if not n_bad and not n_chk else
+               f"꼭 볼 노트 {n_bad}개 🔧, 들어 볼 노트 {n_chk}개" if n_bad else f"꼭 고칠 노트는 없음 👍 — 들어 볼 노트 {n_chk}개")
+    tuned = [r["cents"] for r in rows if r["cents"] is not None]
+    glob = float(np.median(tuned)) if tuned else 0.0
+    L = [f"# 노트 검사 — {os.path.basename(args.file)} ↔ {os.path.basename(args.project)}", "", f"> **한마디: {verdict}**", "",
+         f"- 노트 {len(rows)}개 (트랙: {', '.join(sorted(set(r['track'] for r in rows)))}) / 소리가 프로젝트보다 {off:+.2f}초 밀림(자동 맞춤) / 전체 튜닝 치우침 {glob:+.0f}센트",
+         "- 센트: 100센트 = 반음. ±30 안이면 보통 괜찮고, 60 넘으면 다른 음으로 들림. 일부러 넣은 꺾임·비브라토면 넘어가세요.", ""]
+    if abs(glob) > 20:
+        L.append(f"> 노트 대부분이 같은 쪽으로 {glob:+.0f}센트 치우쳐 있어요. 보컬 전체 튜닝(A=440)이나 반주와의 기준음을 먼저 보세요.\n")
+    L += ["## 고칠 노트", "", "| 노트 | 시각 | 가사 | 음 | 길이 | 측정 | 문제 |", "|---|---|---|---|---|---|---|"]
+    shown = 0
+    for r in rows:
+        if not r["issues"]:
+            continue
+        shown += 1
+        mk = "🔴" if any(x[0] == "🔴" for x in r["issues"]) else "🟠"
+        meas = f"{r['cents']:+.0f}c" if r["cents"] is not None else "-"
+        L.append(f"| {mk} **{r['i']}** | {fmt_t(r['start'])} | {r['lyric'] or '(없음)'} | {note_name(r['pitch'])} | {r['length'] * 1000:.0f}ms | {meas} | "
+                 + "; ".join(x[1] for x in r["issues"]) + " |")
+    if not shown:
+        L.append("| ✅ | | 모든 노트가 괜찮습니다 | | | | |")
+    L += ["", "## 노트 전부", "", "| 노트 | 시각 | 가사 | 음 | 길이 | 측정 |", "|---|---|---|---|---|---|"]
+    for r in rows:
+        meas = f"{r['cents']:+.0f}c" if r["cents"] is not None else "-"
+        L.append(f"| {r['i']} | {fmt_t(r['start'])} | {r['lyric']} | {note_name(r['pitch'])} | {r['length'] * 1000:.0f}ms | {meas} |")
+    L += ["", "- 소리 검사(시각 기준 흠·그림): `소리검사/보고서.md`", "", "※ 노트 번호는 프로젝트의 시간 순서(1부터)입니다. 트랙이 여러 개면 `--track 이름`으로 하나만 보세요."]
+    rp = os.path.join(out, "노트표.md")
+    open(rp, "w", encoding="utf-8").write("\n".join(L))
+    json.dump(dict(verdict=verdict, offset=off, global_cents=glob,
+                   notes=[dict(r, issues=[dict(level=l, msg=m) for l, m in r["issues"]]) for r in rows]),
+              open(os.path.join(out, "notes.json"), "w", encoding="utf-8"), ensure_ascii=False, indent=1, default=float)
+    # 그림: 노트(상자) 위에 측정 음높이(점)
+    try:
+        plt = setup_plt()
+        t0, t1 = max(0.0, rows[0]["start"] - 1), rows[-1]["end"] + 1
+        fig, ax = plt.subplots(1, 1, figsize=(16, 5))
+        mm = (pt >= t0) & (pt <= t1)
+        ax.plot(pt[mm], pm[mm], ".", ms=2, color="tab:green", label="들린 음높이")
+        for r in rows:
+            bad = bool(r["issues"])
+            ax.plot([r["start"], r["end"]], [r["pitch"], r["pitch"]], lw=4, color="tab:red" if bad else "gray", alpha=0.7)
+            if bad:
+                ax.text(r["start"], r["pitch"] + 0.6, str(r["i"]), fontsize=8, color="tab:red")
+        ax.set_xlim(t0, t1)
+        ax.set_xlabel("시간(초)")
+        ax.set_ylabel("음(MIDI)")
+        ax.set_title("노트(회색/빨강=문제) 위에 들린 음높이(초록)")
+        ax.legend(loc="upper right")
+        fig.tight_layout()
+        fig.savefig(os.path.join(out, "노트그림.png"), dpi=80)
+        plt.close(fig)
+    except Exception as e:  # noqa
+        print("그림을 못 그렸습니다:", e)
+    progress_done()
+    print(f"[완료] {rp}")
+    print("\n".join(L[:14]))
     return 0
 
 
@@ -3181,6 +3543,13 @@ def main():
     c.add_argument("--key-from", help="조(키)를 잴 다른 파일(반주·원곡). 보컬.wav 옆에 반주.wav가 있으면 자동")
     c.add_argument("--no-split", action="store_true", help="20분 넘는 파일도 조각내지 않고 한 번에(메모리가 넉넉할 때)")
     c.set_defaults(fn=cmd_check)
+    nt = sub.add_parser("notes", help="노트 단위 검사: 노래 소리 + 프로젝트(.svp/.vpr/.ust/.mid) → 몇 번째 노트가 문제인지")
+    nt.add_argument("file", help="렌더한 보컬 소리 파일")
+    nt.add_argument("project", help="브이신스 .svp / 보컬로이드 .vpr / UTAU .ust / MIDI .mid")
+    nt.add_argument("--track", help="트랙 이름(여러 트랙이면)")
+    nt.add_argument("--offset", type=float, help="소리가 프로젝트보다 몇 초 늦는지(기본: 자동)")
+    nt.add_argument("--out")
+    nt.set_defaults(fn=cmd_notes)
     og = sub.add_parser("origin", help="출처 검사: 꼬리표·C2PA 서명으로 수노·우디오 등 어디서 만든 파일인지")
     og.add_argument("file")
     og.add_argument("--out")

@@ -4,6 +4,11 @@
 
 판마다 무엇이 바뀌었는지 적은 기록입니다. 받는 곳: [Releases](https://github.com/rlawhddja1231-hash/sound-ear/releases) — Claude Code는 `/plugin` 업데이트, claude.ai는 새 `sound-ear.zip`을 다시 올리면 됩니다.
 
+## v1.9.0 — 2026-10-26 · 노트 검사 (몇 번째 노트를 고칠지)
+- **`notes` 명령**: 렌더한 보컬 + 프로젝트 파일(브이신스 `.svp`, 보컬로이드 `.vpr`, UTAU `.ust`, MIDI `.mid`) → 노트마다 음정 치우침(센트), 소리 없는 노트, 쓴 길이보다 짧게 난 노트, 80ms 미만의 짧은 음절, 긴 노트 안의 큰 흔들림, 그리고 소리 검사의 틱·끊김·음 튐을 노트(시작/중간/끝)에 붙여서 `노트표.md`로. 소리와 프로젝트의 시간차는 자동으로 맞춤(±1.5초). `노트그림.png`에 노트 막대 위 들린 음높이.
+- 자체 시험 `tests/notestest.py`: 심은 흠 5개(+45센트, 50ms 노트, 무음 노트, 짧게 난 노트, 노트 가운데 틱) 모두 찾고 헛짚음 없음.
+- 템포가 중간에 바뀌는 프로젝트도 됨. 보컬로이드·UTAU·MIDI는 형식 문서 기준으로 만들었고 실제 파일로는 아직 확인 못 함 — 안 읽히면 Issues에 파일 구조를 알려 주세요.
+
 ## v1.8.2 — 2026-10-26 · 윈도우 자동 준비, 고친 뒤 비교표
 - **ffmpeg 자동 준비**: ffmpeg·ffprobe가 없으면 `setup`이 운영체제에 맞는 정적 빌드(윈도우·리눅스는 깃허브 BtbN, 맥은 evermeet)를 `~/.cache/sound-ear/ffmpeg/`에 받아 두고, 이후 모든 명령이 알아서 씀. 못 받으면 주소와 둘 폴더를 알려 줌. (윈도우에서 "apt/brew로 깔아라"에 막히던 것)
 - **`compare` 비교표**: 앞판·새판을 각각 검사해(결과 재사용) **없어진 흠 / 새로 생긴 흠 / 그대로인 흠**을 표로, 맨 위에 한마디("좋아짐 👍 — 꼭 고칠 것 3 → 0"). 새판이 앞뒤로 밀렸어도(±30초) 시각을 맞춰 비교. 숫자(클리핑·딸깍·음 튐·튜닝·음역) 나란히. `compare.json`도 남김.
@@ -66,6 +71,7 @@
 <a id="english"></a>
 # English
 
+- **1.9.0** — `notes` command: rendered vocal + synth project (.svp/.vpr/.ust/.mid) → per-note report (cents offset, silent/short notes, short syllables, clicks/cuts mapped to notes), auto time alignment, picture. `tests/notestest.py`.
 - **1.8.2** — `setup` downloads a static ffmpeg when missing (Windows/Linux/macOS); `compare` now diffs the findings of both versions (fixed / new / unchanged, with time alignment) and gives a verdict.
 - **1.8.1** — `origin` command (also in `full`): metadata tags, C2PA manifest and generator-name scan → "confirmed / hints / unknown". No audio-only AI score (Suno vs human spectra overlapped; classifiers would misfire).
 - **1.8.0** — `lyrics` command and `full --lyrics`: align written lyrics with the transcript (Korean jamo level, Japanese via kana) and flag garbled syllables with snippets; self-contained `보고서.html` with embedded pictures and ▶ snippets; step progress with time remaining (`진행.txt`); files over 20 min processed in 10-minute pieces and merged (`--no-split` to disable); verified on librosa 1.0.
